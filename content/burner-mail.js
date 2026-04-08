@@ -3,7 +3,7 @@
 
 const BURNER_PREFIX = '[SimpleAuthFlow:burner-mail]';
 const SEEN_BURNER_MAIL_IDS_KEY = 'seenBurnerMailIds';
-const BURNER_CHALLENGE_REQUIRED_MESSAGE = 'Burner Mailbox security verification required. Complete the verification on the mailbox tab, then continue.';
+const BURNER_CHALLENGE_REQUIRED_MESSAGE = 'Burner Mailbox 需要进行安全验证。请在邮箱标签页完成验证后再继续。';
 
 console.log(BURNER_PREFIX, 'Content script loaded on', location.href);
 
@@ -24,7 +24,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse(result);
   }).catch(err => {
     if (isStopError(err)) {
-      log('Burner Mailbox: Stopped by user.', 'warn');
+      log('Burner Mailbox：已被用户停止。', 'warn');
       sendResponse({ stopped: true, error: err.message });
       return;
     }
@@ -52,7 +52,7 @@ async function handleMessage(message) {
     case 'POLL_EMAIL':
       return pollBurnerMailbox(message.step, message.payload || {});
     default:
-      throw new Error(`Unsupported message type: ${message.type}`);
+      throw new Error(`不支持的消息类型：${message.type}`);
   }
 }
 
@@ -249,7 +249,7 @@ async function waitForMailboxReady(timeout = 20000, options = {}) {
     await sleep(250);
   }
 
-  throw new Error('Burner Mailbox page did not become ready.');
+  throw new Error('Burner Mailbox 页面未在预期时间内准备就绪。');
 }
 
 function findNewButton() {
@@ -284,42 +284,42 @@ function findCopyButton() {
 async function fetchBurnerEmail(payload = {}) {
   const { generateNew = true } = payload;
 
-  log(`Burner Mailbox: ${generateNew ? 'Generating' : 'Reading'} temporary email...`);
+  log(`Burner Mailbox：正在${generateNew ? '生成' : '读取'}临时邮箱...`);
   await waitForMailboxReady(20000, { detectChallenge: true });
 
   const currentEmail = getCurrentEmail();
   if (currentEmail && !generateNew) {
-    log(`Burner Mailbox: Reusing existing email ${currentEmail}`, 'ok');
+    log(`Burner Mailbox：复用现有邮箱 ${currentEmail}`, 'ok');
     return { email: currentEmail, generated: false };
   }
 
   const previousEmail = currentEmail;
   const newButton = findNewButton();
   if (!newButton) {
-    throw new Error('Could not find the Burner Mailbox "New" button.');
+    throw new Error('找不到 Burner Mailbox 的“New”按钮。');
   }
 
   await humanPause(300, 900);
   simulateClick(newButton);
-  log('Burner Mailbox: Opened new mailbox panel');
+  log('Burner Mailbox：已打开新邮箱面板');
   await sleep(700);
 
   const randomButton = await waitForRandomButton(10000);
   await humanPause(300, 900);
   simulateClick(randomButton);
-  log('Burner Mailbox: Clicked random email creation');
+  log('Burner Mailbox：已点击随机邮箱生成');
 
   await waitForMailboxActions(15000, { detectChallenge: true });
   const copyButton = findCopyButton();
   if (copyButton) {
     await humanPause(150, 450);
     simulateClick(copyButton);
-    log('Burner Mailbox: Clicked copy button after generation');
+    log('Burner Mailbox：生成后已点击复制按钮');
     await sleep(250);
   }
 
   const nextEmail = await waitForEmailChange(previousEmail, 15000, { detectChallenge: true });
-  log(`Burner Mailbox: Ready email ${nextEmail}`, 'ok');
+  log(`Burner Mailbox：邮箱已就绪 ${nextEmail}`, 'ok');
 
   return { email: nextEmail, generated: true };
 }
@@ -336,12 +336,12 @@ async function prepareBurnerEmail(payload = {}) {
 
   const newButton = findNewButton();
   if (!newButton) {
-    throw new Error('Could not find the Burner Mailbox "New" button.');
+    throw new Error('找不到 Burner Mailbox 的“New”按钮。');
   }
 
   await humanPause(250, 700);
   simulateClick(newButton);
-  log('Burner Mailbox: Opened new mailbox panel');
+  log('Burner Mailbox：已打开新邮箱面板');
   await sleep(700);
 
   return {
@@ -357,7 +357,7 @@ async function clickRandomBurnerEmail(payload = {}) {
   const randomButton = await waitForRandomButton(10000, { detectChallenge: true });
   await humanPause(250, 700);
   simulateClick(randomButton);
-  log('Burner Mailbox: Clicked random email creation');
+  log('Burner Mailbox：已点击随机邮箱生成');
 
   return {
     ok: true,
@@ -374,7 +374,7 @@ async function readBurnerEmail(payload = {}) {
   if (copyButton) {
     await humanPause(100, 250);
     simulateClick(copyButton);
-    log('Burner Mailbox: Clicked copy button while reading current email');
+    log('Burner Mailbox：读取当前邮箱时已点击复制按钮');
     await sleep(200);
   }
 
@@ -402,7 +402,7 @@ async function waitForRandomButton(timeout = 10000, options = {}) {
     if (button) return button;
     await sleep(200);
   }
-  throw new Error('Could not find the random-email button after clicking New.');
+  throw new Error('点击 New 后找不到随机邮箱按钮。');
 }
 
 async function waitForEmailChange(previousEmail = '', timeout = 15000, options = {}) {
@@ -427,7 +427,7 @@ async function waitForEmailChange(previousEmail = '', timeout = 15000, options =
   const current = getCurrentEmail();
   if (current) return current;
 
-  throw new Error('Timed out waiting for Burner Mailbox to show the generated email.');
+  throw new Error('等待 Burner Mailbox 显示生成后的邮箱超时。');
 }
 
 async function waitForMailboxActions(timeout = 15000, options = {}) {
@@ -450,7 +450,7 @@ async function waitForMailboxActions(timeout = 15000, options = {}) {
     await sleep(250);
   }
 
-  throw new Error('Timed out waiting for Burner Mailbox to return to the mailbox action view.');
+  throw new Error('等待 Burner Mailbox 返回邮箱操作视图超时。');
 }
 
 function getMailboxRows() {
@@ -553,7 +553,7 @@ async function pollBurnerMailbox(step, payload) {
   } = payload;
 
   await waitForMailboxReady(20000, { detectChallenge: true });
-  log(`Step ${step}: Starting Burner Mailbox poll (max ${maxAttempts} attempts)`);
+  log(`步骤 ${step}：开始轮询 Burner Mailbox（最多 ${maxAttempts} 次）`);
 
   const currentMailboxEmail = extractEmail(getCurrentEmail());
   const expectedMailboxEmail = extractEmail(targetEmail);
@@ -562,18 +562,18 @@ async function pollBurnerMailbox(step, payload) {
     && expectedMailboxEmail
     && currentMailboxEmail.toLowerCase() !== expectedMailboxEmail.toLowerCase()
   ) {
-    throw new Error(`Burner Mailbox is showing ${currentMailboxEmail}, expected ${expectedMailboxEmail}.`);
+    throw new Error(`Burner Mailbox 当前显示的是 ${currentMailboxEmail}，预期应为 ${expectedMailboxEmail}。`);
   }
 
   const existingIds = collectExistingRowIds();
-  log(`Step ${step}: Snapshotted ${existingIds.size} existing mailbox messages`);
+  log(`步骤 ${step}：已记录当前收件箱中的 ${existingIds.size} 封已有邮件`);
 
   const fallbackAfter = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     throwIfStopped();
     throwIfBurnerChallengeRequired();
-    log(`Polling Burner Mailbox... attempt ${attempt}/${maxAttempts}`);
+    log(`正在轮询 Burner Mailbox... 第 ${attempt}/${maxAttempts} 次`);
 
     if (attempt > 1) {
       await refreshMailbox();
@@ -605,7 +605,7 @@ async function pollBurnerMailbox(step, payload) {
       await persistSeenMailIds();
 
       const source = existingIds.has(rowId) ? 'fallback' : 'new';
-      log(`Step ${step}: Code found: ${code} (${source}, row ${rowId})`, 'ok');
+      log(`步骤 ${step}：已找到验证码：${code}（来源：${source}，邮件行：${rowId}）`, 'ok');
 
       return {
         ok: true,
@@ -617,7 +617,7 @@ async function pollBurnerMailbox(step, payload) {
 
     if (attempt === fallbackAfter + 1) {
       log(
-        `Step ${step}: No new mailbox messages yet, falling back to ${filterAfterTimestamp ? 'previously visible matches inside the allowed time window' : 'older matching messages'}`,
+        `步骤 ${step}：暂未发现新邮件，正在回退到${filterAfterTimestamp ? '允许时间窗口内此前可见的匹配邮件' : '较早的匹配邮件'}进行检查`,
         'warn'
       );
     }
@@ -627,5 +627,5 @@ async function pollBurnerMailbox(step, payload) {
     }
   }
 
-  throw new Error(`No matching verification email found in Burner Mailbox after ${(maxAttempts * intervalMs / 1000).toFixed(0)}s.`);
+  throw new Error(`在 ${(maxAttempts * intervalMs / 1000).toFixed(0)} 秒内未在 Burner Mailbox 中找到匹配的验证码邮件。`);
 }

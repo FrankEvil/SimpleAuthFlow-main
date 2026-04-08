@@ -42,6 +42,13 @@ const TOAST_ICONS = {
   info: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
 };
 
+const LEVEL_LABELS = {
+  info: '信息',
+  warn: '警告',
+  error: '错误',
+  ok: '成功',
+};
+
 function showToast(message, type = 'error', duration = 4000) {
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
@@ -175,21 +182,21 @@ function updateStatusDisplay(state) {
 
   const running = Object.entries(state.stepStatuses).find(([, s]) => s === 'running');
   if (running) {
-    displayStatus.textContent = `Step ${running[0]} running...`;
+    displayStatus.textContent = `步骤 ${running[0]} 执行中...`;
     statusBar.classList.add('running');
     return;
   }
 
   const failed = Object.entries(state.stepStatuses).find(([, s]) => s === 'failed');
   if (failed) {
-    displayStatus.textContent = `Step ${failed[0]} failed`;
+    displayStatus.textContent = `步骤 ${failed[0]} 失败`;
     statusBar.classList.add('failed');
     return;
   }
 
   const stopped = Object.entries(state.stepStatuses).find(([, s]) => s === 'stopped');
   if (stopped) {
-    displayStatus.textContent = `Step ${stopped[0]} stopped`;
+    displayStatus.textContent = `步骤 ${stopped[0]} 已停止`;
     statusBar.classList.add('stopped');
     return;
   }
@@ -200,18 +207,18 @@ function updateStatusDisplay(state) {
     .sort((a, b) => b - a)[0];
 
   if (lastCompleted === 9) {
-    displayStatus.textContent = 'All steps completed!';
+    displayStatus.textContent = '全部步骤已完成';
     statusBar.classList.add('completed');
   } else if (lastCompleted) {
-    displayStatus.textContent = `Step ${lastCompleted} done`;
+    displayStatus.textContent = `步骤 ${lastCompleted} 已完成`;
   } else {
-    displayStatus.textContent = 'Ready';
+    displayStatus.textContent = '就绪';
   }
 }
 
 function appendLog(entry) {
-  const time = new Date(entry.timestamp).toLocaleTimeString('en-US', { hour12: false });
-  const levelLabel = entry.level.toUpperCase();
+  const time = new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+  const levelLabel = LEVEL_LABELS[entry.level] || entry.level;
   const line = document.createElement('div');
   line.className = `log-line log-${entry.level}`;
 
@@ -237,7 +244,7 @@ function escapeHtml(text) {
 }
 
 async function fetchBurnerEmail() {
-  const defaultLabel = 'Auto';
+  const defaultLabel = '自动';
   btnFetchEmail.disabled = true;
   btnFetchEmail.textContent = '...';
 
@@ -248,9 +255,9 @@ async function fetchBurnerEmail() {
       payload: { generateNew: true },
     });
 
-    if (response?.error && /security verification required/i.test(response.error)) {
+    if (response?.error && /(security verification required|需要.*安全验证)/i.test(response.error)) {
       const confirmed = window.confirm(
-        'Burner Mailbox 需要先完成人机验证。\n\n请切到邮箱页完成验证，完成后点“确定”，我会直接继续获取邮箱，不需要你再点 Auto。'
+        'Burner Mailbox 需要先完成人机验证。\n\n请切到邮箱页完成验证，完成后点“确定”，我会直接继续获取邮箱，不需要你再点“自动”。'
       );
       if (!confirmed) {
         throw new Error(response.error);
@@ -267,7 +274,7 @@ async function fetchBurnerEmail() {
       throw new Error(response.error);
     }
     if (!response?.email) {
-      throw new Error('Burner Mailbox email was not returned.');
+      throw new Error('未返回 Burner Mailbox 邮箱地址。');
     }
 
     inputEmail.value = response.email;
@@ -283,7 +290,7 @@ async function fetchBurnerEmail() {
 }
 
 function syncPasswordToggleLabel() {
-  btnTogglePassword.textContent = inputPassword.type === 'password' ? 'Show' : 'Hide';
+  btnTogglePassword.textContent = inputPassword.type === 'password' ? '显示' : '隐藏';
 }
 
 // ============================================================
@@ -296,7 +303,7 @@ document.querySelectorAll('.step-btn').forEach(btn => {
     if (step === 3) {
       const email = inputEmail.value.trim();
       if (!email) {
-        showToast('Please paste an email address or use Auto first', 'warn');
+        showToast('请先粘贴邮箱地址，或先点击“自动”获取', 'warn');
         return;
       }
       await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
@@ -318,7 +325,7 @@ btnTogglePassword.addEventListener('click', () => {
 btnStop.addEventListener('click', async () => {
   btnStop.disabled = true;
   await chrome.runtime.sendMessage({ type: 'STOP_FLOW', source: 'sidepanel', payload: {} });
-  showToast('Stopping current flow...', 'warn', 2000);
+  showToast('正在停止当前流程...', 'warn', 2000);
 });
 
 // Auto Run
@@ -326,7 +333,7 @@ btnAutoRun.addEventListener('click', async () => {
   const totalRuns = parseInt(inputRunCount.value) || 1;
   btnAutoRun.disabled = true;
   inputRunCount.disabled = true;
-  btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> Running...';
+  btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...';
   await chrome.runtime.sendMessage({ type: 'AUTO_RUN', source: 'sidepanel', payload: { totalRuns } });
 });
 
@@ -334,7 +341,7 @@ btnAutoContinue.addEventListener('click', async () => {
   if (autoContinueMode === 'email') {
     const email = inputEmail.value.trim();
     if (!email) {
-      showToast('Please fetch or paste a Burner Mailbox email first!', 'warn');
+      showToast('请先获取或粘贴 Burner Mailbox 邮箱地址', 'warn');
       return;
     }
     autoContinueBar.style.display = 'none';
@@ -350,21 +357,21 @@ btnAutoContinue.addEventListener('click', async () => {
 
 // Reset
 btnReset.addEventListener('click', async () => {
-  if (confirm('Reset all steps and data?')) {
+  if (confirm('确认重置全部步骤和数据吗？')) {
     await chrome.runtime.sendMessage({ type: 'RESET', source: 'sidepanel' });
-    displayOauthUrl.textContent = 'Waiting...';
+    displayOauthUrl.textContent = '等待中...';
     displayOauthUrl.classList.remove('has-value');
-    displayLocalhostUrl.textContent = 'Waiting...';
+    displayLocalhostUrl.textContent = '等待中...';
     displayLocalhostUrl.classList.remove('has-value');
     inputEmail.value = '';
-    displayStatus.textContent = 'Ready';
+    displayStatus.textContent = '就绪';
     statusBar.className = 'status-bar';
     logArea.innerHTML = '';
     document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
     document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
     btnAutoRun.disabled = false;
     inputRunCount.disabled = false;
-    btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
+    btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
     autoContinueBar.style.display = 'none';
     updateStopButtonState(false);
     updateButtonStates();
@@ -433,19 +440,19 @@ chrome.runtime.onMessage.addListener((message) => {
 
     case 'AUTO_RUN_RESET': {
       // Full UI reset for next run
-      displayOauthUrl.textContent = 'Waiting...';
+      displayOauthUrl.textContent = '等待中...';
       displayOauthUrl.classList.remove('has-value');
-      displayLocalhostUrl.textContent = 'Waiting...';
+      displayLocalhostUrl.textContent = '等待中...';
       displayLocalhostUrl.classList.remove('has-value');
       inputEmail.value = '';
-      displayStatus.textContent = 'Ready';
+      displayStatus.textContent = '就绪';
       statusBar.className = 'status-bar';
       logArea.innerHTML = '';
       document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
       document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
       updateStopButtonState(false);
       autoContinueMode = 'email';
-      autoContinueHint.textContent = 'Use Auto to fetch a Burner Mailbox email, or paste manually, then continue';
+      autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
       updateProgressCounter();
       break;
     }
@@ -475,37 +482,37 @@ chrome.runtime.onMessage.addListener((message) => {
         case 'waiting_email':
           autoContinueBar.style.display = 'flex';
           autoContinueMode = 'email';
-          autoContinueHint.textContent = 'Use Auto to fetch a Burner Mailbox email, or paste manually, then continue';
-          btnAutoRun.innerHTML = `Paused${runLabel}`;
+          autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
+          btnAutoRun.innerHTML = `已暂停${runLabel}`;
           updateStopButtonState(true);
           break;
         case 'waiting_challenge':
           autoContinueBar.style.display = 'flex';
           autoContinueMode = 'challenge';
           autoContinueHint.textContent = 'Burner Mailbox 需要先完成人机验证。请在邮箱页完成验证后点击“继续”';
-          btnAutoRun.innerHTML = `Paused${runLabel}`;
+          btnAutoRun.innerHTML = `已暂停${runLabel}`;
           updateStopButtonState(true);
           break;
         case 'running':
-          btnAutoRun.innerHTML = `Running${runLabel}`;
+          btnAutoRun.innerHTML = `运行中${runLabel}`;
           updateStopButtonState(true);
           break;
         case 'complete':
           btnAutoRun.disabled = false;
           inputRunCount.disabled = false;
-          btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
+          btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
           autoContinueBar.style.display = 'none';
           autoContinueMode = 'email';
-          autoContinueHint.textContent = 'Use Auto to fetch a Burner Mailbox email, or paste manually, then continue';
+          autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
           updateStopButtonState(false);
           break;
         case 'stopped':
           btnAutoRun.disabled = false;
           inputRunCount.disabled = false;
-          btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
+          btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
           autoContinueBar.style.display = 'none';
           autoContinueMode = 'email';
-          autoContinueHint.textContent = 'Use Auto to fetch a Burner Mailbox email, or paste manually, then continue';
+          autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
           updateStopButtonState(false);
           break;
       }
