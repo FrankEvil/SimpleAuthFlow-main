@@ -333,8 +333,8 @@ test('配置项会持久化到 storage.local 并在重载后恢复', () => {
 test('DuckDuckGo 验证码会在 3 分钟内每 4 秒轮询，并在固定时点重发', () => {
   assert.match(
     backgroundJs,
-    /const DEFAULT_STEP_TIMEOUT_MS = 200000;[\s\S]*?const DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS = \[10000\];/,
-    '默认超时或验证码单次重发时点常量没有统一声明'
+    /const DEFAULT_STEP_TIMEOUT_MS = 200000;[\s\S]*?const VERIFICATION_STEP_TIMEOUT_MS = 300000;[\s\S]*?const DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS = \[10000\];/,
+    '默认超时、验证码步骤 300 秒超时或验证码单次重发时点常量没有统一声明'
   );
   assert.match(
     backgroundJs,
@@ -379,7 +379,12 @@ test('DuckDuckGo 验证码会在 3 分钟内每 4 秒轮询，并在固定时点
   assert.doesNotMatch(
     backgroundJs,
     /await executeStepAndWait\(4, 2000, 300000\)|await executeStepAndWait\(7, 2000, 300000\)/,
-    '自动运行里的步骤 4 或步骤 7 仍然写死了单独超时'
+    '自动运行里的步骤 4 或步骤 7 仍然写死了数字超时'
+  );
+  assert.match(
+    backgroundJs,
+    /await executeStepAndWait\(4, 2000, VERIFICATION_STEP_TIMEOUT_MS\);[\s\S]*?await executeStepAndWait\(7, 2000, VERIFICATION_STEP_TIMEOUT_MS\);/,
+    '自动运行里的步骤 4 或步骤 7 没有使用验证码步骤专属 300 秒超时'
   );
   assert.match(
     backgroundJs,
@@ -398,8 +403,18 @@ test('DuckDuckGo 验证码会在 3 分钟内每 4 秒轮询，并在固定时点
   );
   assert.match(
     backgroundJs,
-    /const totalDurationMs = DEFAULT_STEP_TIMEOUT_MS;[\s\S]*?const startedAt = Date\.now\(\);[\s\S]*?const triggeredResends = new Set\(\);[\s\S]*?const failedCodes = new Set\(\);[\s\S]*?const failedMailIds = new Set\(\);[\s\S]*?let currentFilterAfterTimestamp = filterAfterTimestamp \|\| 0;[\s\S]*?excludedCodes: \[\.\.\.excludedCodes, \.\.\.failedCodes\],[\s\S]*?excludedMailIds: \[\.\.\.excludedMailIds, \.\.\.failedMailIds\],[\s\S]*?currentFilterAfterTimestamp = advanceFilterAfterTimestamp\(/,
+    /totalDurationMs = DEFAULT_STEP_TIMEOUT_MS,[\s\S]*?const startedAt = Date\.now\(\);[\s\S]*?const triggeredResends = new Set\(\);[\s\S]*?const failedCodes = new Set\(\);[\s\S]*?const failedMailIds = new Set\(\);[\s\S]*?let currentFilterAfterTimestamp = filterAfterTimestamp \|\| 0;[\s\S]*?excludedCodes: \[\.\.\.excludedCodes, \.\.\.failedCodes\],[\s\S]*?excludedMailIds: \[\.\.\.excludedMailIds, \.\.\.failedMailIds\],[\s\S]*?currentFilterAfterTimestamp = advanceFilterAfterTimestamp\(/,
     '普通网页邮箱轮询没有在验证码失效后同步推进时间下限并排除失败邮件'
+  );
+  assert.match(
+    backgroundJs,
+    /async function executeStep4\(state\) \{[\s\S]*?pollVerificationCodeWithRetry\(4, state, \{[\s\S]*?totalDurationMs: VERIFICATION_STEP_TIMEOUT_MS,/,
+    '步骤 4 没有把验证码轮询超时提升到 300 秒'
+  );
+  assert.match(
+    backgroundJs,
+    /async function executeStep7\(state\) \{[\s\S]*?pollVerificationCodeWithRetry\(7, state, \{[\s\S]*?totalDurationMs: VERIFICATION_STEP_TIMEOUT_MS,/,
+    '步骤 7 没有把验证码轮询超时提升到 300 秒'
   );
   assert.match(
     backgroundJs,

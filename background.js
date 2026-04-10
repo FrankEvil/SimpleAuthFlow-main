@@ -15,6 +15,7 @@ const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const DEFAULT_STEP_TIMEOUT_MS = 200000;
+const VERIFICATION_STEP_TIMEOUT_MS = 300000;
 const DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS = [10000];
 const MAX_FRESH_EMAIL_ATTEMPTS = 5;
 const NO_FRESH_EMAIL_ERROR_MESSAGE = '无法再获取到新邮箱';
@@ -1781,10 +1782,10 @@ async function autoRunLoop(totalRuns) {
       }
 
       await executeStepAndWait(3, 3000);
-      await executeStepAndWait(4, 2000);
+      await executeStepAndWait(4, 2000, VERIFICATION_STEP_TIMEOUT_MS);
       await executeStepAndWait(5, 3000);
       await executeStepAndWait(6, 3000);
-      await executeStepAndWait(7, 2000);
+      await executeStepAndWait(7, 2000, VERIFICATION_STEP_TIMEOUT_MS);
       await executeStepAndWait(8, 2000);
       await executeStepAndWait(9, 1000);
 
@@ -2204,6 +2205,7 @@ async function refreshGmailInbox(step, mail) {
 
 async function pollVerificationCodeWithRetry(step, state, options) {
   const {
+    totalDurationMs = DEFAULT_STEP_TIMEOUT_MS,
     filterAfterTimestamp,
     senderFilters,
     subjectFilters,
@@ -2231,7 +2233,6 @@ async function pollVerificationCodeWithRetry(step, state, options) {
   };
 
   if (mail.provider === 'duckduckgo') {
-    const totalDurationMs = DEFAULT_STEP_TIMEOUT_MS;
     const pollIntervalMs = 4000;
     const resendScheduleMs = DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS;
     const startedAt = Date.now();
@@ -2312,7 +2313,6 @@ async function pollVerificationCodeWithRetry(step, state, options) {
   }
 
   if (mail.provider === 'duck_google') {
-    const totalDurationMs = DEFAULT_STEP_TIMEOUT_MS;
     const pollIntervalMs = 4000;
     const resendScheduleMs = DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS;
     const startedAt = Date.now();
@@ -2393,7 +2393,6 @@ async function pollVerificationCodeWithRetry(step, state, options) {
     throw new Error(`${failureLabel}，${Math.round(totalDurationMs / 1000)} 秒内未拿到可用验证码。`);
   }
 
-  const totalDurationMs = DEFAULT_STEP_TIMEOUT_MS;
   const startedAt = Date.now();
   const triggeredResends = new Set();
   const failedCodes = new Set();
@@ -2487,6 +2486,7 @@ async function pollVerificationCodeWithRetry(step, state, options) {
 
 async function executeStep4(state) {
   const code = await pollVerificationCodeWithRetry(4, state, {
+    totalDurationMs: VERIFICATION_STEP_TIMEOUT_MS,
     filterAfterTimestamp: state.flowStartTime || 0,
     senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt'],
     subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm'],
@@ -2553,6 +2553,7 @@ async function executeStep6(state) {
 
 async function executeStep7(state) {
   const code = await pollVerificationCodeWithRetry(7, state, {
+    totalDurationMs: VERIFICATION_STEP_TIMEOUT_MS,
     filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
     senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt'],
     subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm', 'login'],
