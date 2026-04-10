@@ -50,12 +50,48 @@
       </div>
       <div class="data-row">
         <span class="data-label">邮箱服务</span>
-        <span class="data-value">Burner Mailbox</span>
+        <select id="input-mail-provider" class="data-select">
+          <option value="burner-mail">Burner Mailbox</option>
+          <option value="duckduckgo">DuckDuckGo</option>
+          <option value="duck_google">Duck + Google</option>
+        </select>
+      </div>
+      <div class="data-row ddg-config-row" style="display:none;">
+        <span class="data-label">DDG API</span>
+        <input type="text" id="input-ddg-api-base" class="data-input" placeholder="https://quack.duckduckgo.com" />
+      </div>
+      <div class="data-row ddg-config-row" style="display:none;">
+        <span class="data-label">DDG Token</span>
+        <input type="password" id="input-ddg-token" class="data-input" placeholder="DuckDuckGo API token" />
+      </div>
+      <div class="data-row ddg-config-row" style="display:none;">
+        <span class="data-label">DDG 域名</span>
+        <input type="text" id="input-ddg-alias-domain" class="data-input" placeholder="duck.com" />
+      </div>
+      <div class="data-row ddg-config-row" style="display:none;">
+        <span class="data-label">DDG Inbox</span>
+        <input type="text" id="input-ddg-temp-mail-address" class="data-input" placeholder="Temp Mail Address" />
+      </div>
+      <div class="data-row ddg-config-row" style="display:none;">
+        <span class="data-label">DDG JWT</span>
+        <input type="password" id="input-ddg-temp-mail-jwt" class="data-input" placeholder="Temp Mail JWT" />
+      </div>
+      <div class="data-row duck-google-config-row" style="display:none;">
+        <span class="data-label">DG API</span>
+        <input type="text" id="input-duck-google-api-base" class="data-input" placeholder="https://quack.duckduckgo.com" />
+      </div>
+      <div class="data-row duck-google-config-row" style="display:none;">
+        <span class="data-label">DG Token</span>
+        <input type="password" id="input-duck-google-token" class="data-input" placeholder="Duck + Google token" />
+      </div>
+      <div class="data-row duck-google-config-row" style="display:none;">
+        <span class="data-label">DG 域名</span>
+        <input type="text" id="input-duck-google-alias-domain" class="data-input" placeholder="duck.com" />
       </div>
       <div class="data-row">
         <span class="data-label">邮箱</span>
         <div class="data-inline">
-          <input type="text" id="input-email" class="data-input" placeholder="自动从 Burner Mailbox 获取，或手动粘贴" />
+          <input type="text" id="input-email" class="data-input" placeholder="自动获取当前邮箱服务地址，或手动粘贴" />
           <button id="btn-fetch-email" class="btn btn-outline btn-sm" type="button">自动</button>
         </div>
       </div>
@@ -81,7 +117,7 @@
     </div>
     <div id="auto-continue-bar" class="auto-continue-bar" style="display:none;">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      <span id="auto-continue-hint" class="auto-hint">点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续</span>
+      <span id="auto-continue-hint" class="auto-hint">点击“自动”获取当前邮箱服务地址，或手动粘贴后继续</span>
       <button id="btn-auto-continue" class="btn btn-primary btn-sm">继续</button>
     </div>
   </section>

@@ -38,6 +38,13 @@
       ],
       "js": ["content/utils.js", "content/burner-mail.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "js": ["content/utils.js", "content/gmail-mail.js"],
+      "run_at": "document_idle"
     }
   ],
   "action": {

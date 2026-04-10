@@ -4,15 +4,61 @@ importScripts('data/names.js');
 
 const LOG_PREFIX = '[SimpleAuthFlow:bg]';
 const BURNER_MAILBOX_URL = 'https://burnermailbox.com/mailbox';
+const GMAIL_INBOX_URL = 'https://mail.google.com/mail/u/0/#inbox';
+const DUCKDUCKGO_API_BASE = 'https://quack.duckduckgo.com';
+const DEFAULT_DDG_ALIAS_DOMAIN = 'duck.com';
+const DEFAULT_MAIL_PROVIDER = 'burner-mail';
 const DEFAULT_VPS_URL = 'http://127.0.0.1:8317/management.html#/oauth';
+const EXPECTED_CODEX_CONSENT_URL = 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent';
 const BURNER_CHALLENGE_REQUIRED_MESSAGE = 'Burner Mailbox 需要进行安全验证。';
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
+const DEFAULT_STEP_TIMEOUT_MS = 200000;
+const DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS = [10000];
+const MAX_FRESH_EMAIL_ATTEMPTS = 5;
+const NO_FRESH_EMAIL_ERROR_MESSAGE = '无法再获取到新邮箱';
+const PERSISTED_SETTING_KEYS = [
+  'email',
+  'mailProvider',
+  'ddgApiBase',
+  'ddgToken',
+  'ddgAliasDomain',
+  'ddgTempMailAddress',
+  'ddgTempMailJwt',
+  'duckGoogleApiBase',
+  'duckGoogleToken',
+  'duckGoogleAliasDomain',
+  'vpsUrl',
+  'customPassword',
+];
 
 initializeSessionStorageAccess();
 
 let automationWindowId = null;
+
+function getErrorMessage(error) {
+  if (typeof error === 'string') return error;
+  return error?.message || String(error || '');
+}
+
+function isExpectedFlowIssueMessage(message) {
+  const text = (message || '').trim();
+  if (!text) return false;
+
+  return (
+    text === STOP_ERROR_MESSAGE
+    || text.includes('流程已被用户停止')
+    || text.includes('Flow stopped by user')
+    || text.includes('Burner Mailbox 需要进行安全验证')
+    || text.includes('请在邮箱标签页完成验证后再继续')
+    || text.includes('未在 Burner Mailbox 中找到匹配的验证码邮件')
+    || text.includes('未在 DuckDuckGo 收件箱中找到匹配的验证码邮件')
+    || text.includes('未在 Gmail 收件箱中找到匹配的验证码邮件')
+    || (text.includes('Burner Mailbox 当前显示的是') && text.includes('预期应为'))
+    || text.includes('在验证页面中找不到重发邮件按钮')
+  );
+}
 
 // ============================================================
 // State Management (chrome.storage.session)
@@ -34,13 +80,27 @@ const DEFAULT_STATE = {
   flowStartTime: null,
   tabRegistry: {},
   logs: [],
+  generatedEmails: [],
+  mailProvider: DEFAULT_MAIL_PROVIDER,
+  ddgApiBase: DUCKDUCKGO_API_BASE,
+  ddgToken: '',
+  ddgAliasDomain: DEFAULT_DDG_ALIAS_DOMAIN,
+  ddgTempMailAddress: '',
+  ddgTempMailJwt: '',
+  duckGoogleApiBase: DUCKDUCKGO_API_BASE,
+  duckGoogleToken: '',
+  duckGoogleAliasDomain: DEFAULT_DDG_ALIAS_DOMAIN,
+  lastSignupVerificationCode: null,
   vpsUrl: '',
   customPassword: '',
 };
 
 async function getState() {
-  const state = await chrome.storage.session.get(null);
-  return { ...DEFAULT_STATE, ...state };
+  const [sessionState, persistedState] = await Promise.all([
+    chrome.storage.session.get(null),
+    chrome.storage.local.get(PERSISTED_SETTING_KEYS),
+  ]);
+  return { ...DEFAULT_STATE, ...persistedState, ...sessionState };
 }
 
 async function initializeSessionStorageAccess() {
@@ -59,6 +119,23 @@ async function initializeSessionStorageAccess() {
 async function setState(updates) {
   console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(updates).slice(0, 200));
   await chrome.storage.session.set(updates);
+}
+
+async function persistSettings(updates) {
+  const persistedUpdates = {};
+  for (const key of PERSISTED_SETTING_KEYS) {
+    if (updates[key] !== undefined) {
+      persistedUpdates[key] = updates[key];
+    }
+  }
+  if (Object.keys(persistedUpdates).length > 0) {
+    await chrome.storage.local.set(persistedUpdates);
+  }
+}
+
+async function setStateAndPersist(updates) {
+  await setState(updates);
+  await persistSettings(updates);
 }
 
 async function ensureAutomationWindowId() {
@@ -94,6 +171,43 @@ function getEffectiveVpsUrl(value) {
   return normalizeVpsUrl(value) || DEFAULT_VPS_URL;
 }
 
+function normalizeMailProvider(value) {
+  return ['duckduckgo', 'duck_google'].includes(value) ? value : DEFAULT_MAIL_PROVIDER;
+}
+
+function normalizeDuckAliasDomain(value) {
+  const domain = String(value || '').trim().toLowerCase().replace(/^@+/, '');
+  return domain || DEFAULT_DDG_ALIAS_DOMAIN;
+}
+
+function normalizeUrlSetting(value) {
+  return typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
+}
+
+function getMailProviderLabel(provider) {
+  const normalized = normalizeMailProvider(provider);
+  if (normalized === 'duckduckgo') return 'DuckDuckGo';
+  if (normalized === 'duck_google') return 'Duck + Google';
+  return 'Burner Mailbox';
+}
+
+function normalizeEmailAddress(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isNoFreshEmailError(error) {
+  return getErrorMessage(error).includes(NO_FRESH_EMAIL_ERROR_MESSAGE);
+}
+
+function isExpectedCodexConsentUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    return `${parsed.origin}${parsed.pathname}` === EXPECTED_CODEX_CONSENT_URL;
+  } catch {
+    return false;
+  }
+}
+
 function broadcastDataUpdate(payload) {
   chrome.runtime.sendMessage({
     type: 'DATA_UPDATED',
@@ -102,8 +216,29 @@ function broadcastDataUpdate(payload) {
 }
 
 async function setEmailState(email) {
-  await setState({ email });
+  await setStateAndPersist({ email });
   broadcastDataUpdate({ email });
+}
+
+async function setMailProviderState(mailProvider) {
+  const normalized = normalizeMailProvider(mailProvider);
+  await setStateAndPersist({ mailProvider: normalized });
+  broadcastDataUpdate({ mailProvider: normalized });
+}
+
+async function rememberGeneratedEmail(email) {
+  const normalized = normalizeEmailAddress(email);
+  if (!normalized) return;
+
+  const state = await getState();
+  const current = Array.isArray(state.generatedEmails) ? state.generatedEmails : [];
+  if (current.includes(normalized)) return;
+
+  const next = [...current, normalized];
+  if (next.length > 500) {
+    next.splice(0, next.length - 500);
+  }
+  await setState({ generatedEmails: next });
 }
 
 async function setPasswordState(password) {
@@ -114,14 +249,17 @@ async function setPasswordState(password) {
 async function resetState() {
   console.log(LOG_PREFIX, 'Resetting all state');
   // Preserve settings and persistent data across resets
-  const prev = await chrome.storage.session.get([
-    'seenCodes',
-    'seenInbucketMailIds',
+  const [prev, persisted] = await Promise.all([
+    chrome.storage.session.get([
+      'seenCodes',
+      'seenInbucketMailIds',
     'seenBurnerMailIds',
     'accounts',
+    'generatedEmails',
     'tabRegistry',
-    'vpsUrl',
-    'customPassword',
+      'password',
+    ]),
+    chrome.storage.local.get(PERSISTED_SETTING_KEYS),
   ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
@@ -130,9 +268,21 @@ async function resetState() {
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     seenBurnerMailIds: prev.seenBurnerMailIds || [],
     accounts: prev.accounts || [],
+    generatedEmails: prev.generatedEmails || [],
     tabRegistry: prev.tabRegistry || {},
-    vpsUrl: prev.vpsUrl || '',
-    customPassword: prev.customPassword || '',
+    email: persisted.email || '',
+    mailProvider: normalizeMailProvider(persisted.mailProvider),
+    ddgApiBase: normalizeUrlSetting(persisted.ddgApiBase) || DUCKDUCKGO_API_BASE,
+    ddgToken: persisted.ddgToken || '',
+    ddgAliasDomain: normalizeDuckAliasDomain(persisted.ddgAliasDomain),
+    ddgTempMailAddress: normalizeUrlSetting(persisted.ddgTempMailAddress),
+    ddgTempMailJwt: persisted.ddgTempMailJwt || '',
+    duckGoogleApiBase: normalizeUrlSetting(persisted.duckGoogleApiBase) || DUCKDUCKGO_API_BASE,
+    duckGoogleToken: persisted.duckGoogleToken || '',
+    duckGoogleAliasDomain: normalizeDuckAliasDomain(persisted.duckGoogleAliasDomain),
+    vpsUrl: persisted.vpsUrl || '',
+    customPassword: persisted.customPassword || '',
+    password: prev.password || null,
   });
 }
 
@@ -358,6 +508,9 @@ async function reuseOrCreateTab(source, url, options = {}) {
   // Create new tab
   const wid = await ensureAutomationWindowId();
   const tab = await chrome.tabs.create({ url, active: true, windowId: wid });
+  const registry = await getTabRegistry();
+  registry[source] = { tabId: tab.id, ready: false };
+  await setState({ tabRegistry: registry });
   console.log(LOG_PREFIX, `Created new tab ${source} (${tab.id})`);
 
   // If dynamic injection needed (VPS panel), inject scripts after load
@@ -555,7 +708,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender).then(response => {
     sendResponse(response);
   }).catch(err => {
-    console.error(LOG_PREFIX, 'Handler error:', err);
+    const reporter = isExpectedFlowIssueMessage(getErrorMessage(err)) ? console.warn : console.error;
+    reporter(LOG_PREFIX, 'Handler error:', err);
     sendResponse({ error: err.message });
   });
 
@@ -648,7 +802,19 @@ async function handleMessage(message, sender) {
       const updates = {};
       if (message.payload.vpsUrl !== undefined) updates.vpsUrl = normalizeVpsUrl(message.payload.vpsUrl);
       if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
-      await setState(updates);
+      if (message.payload.mailProvider !== undefined) updates.mailProvider = normalizeMailProvider(message.payload.mailProvider);
+      if (message.payload.ddgApiBase !== undefined) updates.ddgApiBase = normalizeUrlSetting(message.payload.ddgApiBase) || DUCKDUCKGO_API_BASE;
+      if (message.payload.ddgToken !== undefined) updates.ddgToken = String(message.payload.ddgToken || '').trim();
+      if (message.payload.ddgAliasDomain !== undefined) updates.ddgAliasDomain = normalizeDuckAliasDomain(message.payload.ddgAliasDomain);
+      if (message.payload.ddgTempMailAddress !== undefined) updates.ddgTempMailAddress = normalizeUrlSetting(message.payload.ddgTempMailAddress);
+      if (message.payload.ddgTempMailJwt !== undefined) updates.ddgTempMailJwt = String(message.payload.ddgTempMailJwt || '').trim();
+      if (message.payload.duckGoogleApiBase !== undefined) updates.duckGoogleApiBase = normalizeUrlSetting(message.payload.duckGoogleApiBase) || DUCKDUCKGO_API_BASE;
+      if (message.payload.duckGoogleToken !== undefined) updates.duckGoogleToken = String(message.payload.duckGoogleToken || '').trim();
+      if (message.payload.duckGoogleAliasDomain !== undefined) updates.duckGoogleAliasDomain = normalizeDuckAliasDomain(message.payload.duckGoogleAliasDomain);
+      await setStateAndPersist(updates);
+      if (updates.mailProvider) {
+        broadcastDataUpdate({ mailProvider: updates.mailProvider });
+      }
       return { ok: true };
     }
 
@@ -658,15 +824,17 @@ async function handleMessage(message, sender) {
       return { ok: true, email: message.payload.email };
     }
 
+    case 'FETCH_PROVIDER_EMAIL':
     case 'FETCH_BURNER_EMAIL': {
       clearStopRequest();
-      const email = await fetchBurnerEmail(message.payload || {});
+      const email = await fetchSelectedProviderEmail(message.payload || {});
       return { ok: true, email };
     }
 
+    case 'CONTINUE_MAIL_PROVIDER_AFTER_CHALLENGE':
     case 'CONTINUE_BURNER_AFTER_CHALLENGE': {
       clearStopRequest();
-      const email = await continueBurnerAfterChallenge(message.payload || {});
+      const email = await continueSelectedProviderAfterChallenge(message.payload || {});
       return { ok: true, email };
     }
 
@@ -697,7 +865,12 @@ async function handleStepData(step, payload) {
       if (payload.email) await setEmailState(payload.email);
       break;
     case 4:
-      if (payload.emailTimestamp) await setState({ lastEmailTimestamp: payload.emailTimestamp });
+      if (payload.emailTimestamp || payload.code) {
+        await setState({
+          ...(payload.emailTimestamp ? { lastEmailTimestamp: payload.emailTimestamp } : {}),
+          ...(payload.code ? { lastSignupVerificationCode: payload.code } : {}),
+        });
+      }
       break;
     case 8:
       if (payload.localhostUrl) {
@@ -718,7 +891,7 @@ async function handleStepData(step, payload) {
 const stepWaiters = new Map();
 let resumeWaiter = null;
 
-function waitForStepComplete(step, timeoutMs = 120000) {
+function waitForStepComplete(step, timeoutMs = DEFAULT_STEP_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     throwIfStopped();
     const timer = setTimeout(() => {
@@ -836,9 +1009,9 @@ async function executeStep(step) {
  * @param {number} step
  * @param {number} delayAfter - ms to wait after completion (for page transitions)
  */
-async function executeStepAndWait(step, delayAfter = 2000) {
+async function executeStepAndWait(step, delayAfter = 2000, timeoutMs = DEFAULT_STEP_TIMEOUT_MS) {
   throwIfStopped();
-  const promise = waitForStepComplete(step, 120000);
+  const promise = waitForStepComplete(step, timeoutMs);
   await executeStep(step);
   await promise;
   // Extra delay for page transitions / DOM updates
@@ -960,6 +1133,310 @@ async function waitForBurnerMailboxReadyAfterChallenge(timeout = 45000) {
   }
 
   throw new Error('Burner Mailbox 还没有返回邮箱页面。');
+}
+
+function getDuckDuckGoAliasConfig(state) {
+  return {
+    apiBase: normalizeUrlSetting(state.ddgApiBase) || DUCKDUCKGO_API_BASE,
+    token: String(state.ddgToken || '').trim(),
+    aliasDomain: normalizeDuckAliasDomain(state.ddgAliasDomain),
+    tempMailAddress: normalizeUrlSetting(state.ddgTempMailAddress),
+    tempMailJwt: String(state.ddgTempMailJwt || '').trim(),
+  };
+}
+
+function getDuckGoogleAliasConfig(state) {
+  return {
+    apiBase: normalizeUrlSetting(state.duckGoogleApiBase) || DUCKDUCKGO_API_BASE,
+    token: String(state.duckGoogleToken || '').trim(),
+    aliasDomain: normalizeDuckAliasDomain(state.duckGoogleAliasDomain),
+  };
+}
+
+function getSelectedMailConfig(state) {
+  const provider = normalizeMailProvider(state.mailProvider);
+  if (provider === 'duckduckgo') {
+    return {
+      provider,
+      label: getMailProviderLabel(provider),
+      ...getDuckDuckGoAliasConfig(state),
+    };
+  }
+  if (provider === 'duck_google') {
+    return {
+      provider,
+      source: 'gmail-mail',
+      url: GMAIL_INBOX_URL,
+      label: getMailProviderLabel(provider),
+      ...getDuckGoogleAliasConfig(state),
+    };
+  }
+
+  return {
+    provider: DEFAULT_MAIL_PROVIDER,
+    source: 'burner-mail',
+    url: BURNER_MAILBOX_URL,
+    label: getMailProviderLabel(DEFAULT_MAIL_PROVIDER),
+  };
+}
+
+function validateDuckAliasConfig(mail, channelLabel = 'DuckDuckGo') {
+  if (!mail.apiBase) return '请先配置 DuckDuckGo API 地址。';
+  if (!mail.token) return '请先配置 DuckDuckGo token。';
+  if (!mail.aliasDomain) return '请先配置 DuckDuckGo 邮箱域名。';
+  if (channelLabel === 'DuckDuckGo' && !mail.tempMailAddress) return '请先配置 DuckDuckGo Temp Mail Address。';
+  if (channelLabel === 'DuckDuckGo' && !mail.tempMailJwt) return '请先配置 DuckDuckGo Temp Mail JWT。';
+  return '';
+}
+
+function validateSelectedMailConfig(mail) {
+  if (mail.provider === 'duckduckgo') {
+    return validateDuckAliasConfig(mail, 'DuckDuckGo');
+  }
+  return '';
+}
+
+function buildBearerAuthHeader(value) {
+  const token = String(value || '').trim();
+  if (!token) return '';
+  return /^bearer\s+/i.test(token) ? token : `Bearer ${token}`;
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+
+  if (!response.ok) {
+    const detail = typeof data === 'string'
+      ? data
+      : data?.error || data?.message || data?.detail || '';
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
+
+  return data;
+}
+
+function joinUrl(base, path) {
+  return `${String(base || '').replace(/\/+$/, '')}/${String(path || '').replace(/^\/+/, '')}`;
+}
+
+function extractVerificationCodeFromText(text) {
+  const source = text || '';
+  const matchCn = source.match(/(?:代码为|验证码[^0-9]*?)[\s：:]*(\d{6})/);
+  if (matchCn) return matchCn[1];
+
+  const matchEn = source.match(/code[:\s]+is[:\s]+(\d{6})|code[:\s]+(\d{6})/i);
+  if (matchEn) return matchEn[1] || matchEn[2];
+
+  const match6 = source.match(/\b(\d{6})\b/);
+  return match6 ? match6[1] : null;
+}
+
+function htmlToText(html) {
+  return String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractMailHeader(raw, headerName) {
+  const source = String(raw || '');
+  if (!source) return '';
+  const pattern = new RegExp(`^${headerName}:\\s*(.+)$`, 'im');
+  return source.match(pattern)?.[1]?.trim() || '';
+}
+
+function normalizeTempMailRecord(message) {
+  if (!message || typeof message !== 'object') return null;
+  const record = message;
+  const raw = typeof record.raw === 'string'
+    ? record.raw
+    : (typeof record.mime === 'string' ? record.mime : (typeof record.content === 'string' ? record.content : ''));
+  const html = String(record.html || record.html_content || '').trim();
+  const text = String(record.text || record.body || record.plain || '').trim() || htmlToText(html);
+  const from = String(
+    record.from
+      || record.sender
+      || record.from_address
+      || extractMailHeader(raw, 'From')
+      || record.source
+      || ''
+  ).trim();
+  const subject = String(record.subject || record.title || extractMailHeader(raw, 'Subject') || '').trim();
+  const date = String(
+    record.receivedAt
+      || record.received_at
+      || record.createdAt
+      || record.created_at
+      || record.date
+      || record.timestamp
+      || extractMailHeader(raw, 'Date')
+      || ''
+  ).trim();
+
+  return {
+    id: record.id || record.mail_id || record.mailId || record.message_id || record.uuid || '',
+    from,
+    subject,
+    text,
+    html,
+    raw,
+    time: date,
+  };
+}
+
+function findTempMailRecords(value) {
+  if (Array.isArray(value)) {
+    const normalized = value.map(normalizeTempMailRecord).filter(Boolean);
+    if (normalized.length) return normalized;
+    for (const item of value) {
+      const nested = findTempMailRecords(item);
+      if (nested.length) return nested;
+    }
+    return [];
+  }
+
+  if (!value || typeof value !== 'object') return [];
+  const keys = ['data', 'mails', 'items', 'list', 'rows', 'records', 'result', 'results', 'messages'];
+  for (const key of keys) {
+    if (value[key] !== undefined) {
+      const nested = findTempMailRecords(value[key]);
+      if (nested.length) return nested;
+    }
+  }
+  return [];
+}
+
+async function fetchDuckDuckGoMessages(mail) {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Authorization: buildBearerAuthHeader(mail.tempMailJwt),
+  };
+  const params = new URLSearchParams({ limit: '20', offset: '0' });
+  const data = await fetchJson(`${joinUrl(mail.tempMailAddress, '/api/mails')}?${params.toString()}`, {
+    method: 'GET',
+    headers,
+  });
+  return findTempMailRecords(data);
+}
+
+function parseMailTimestamp(value, options = {}) {
+  const { assumeUtcWithoutZone = false } = options;
+  if (!value) return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric > 1e12 ? numeric : numeric * 1000;
+  }
+  const text = String(value).trim();
+  const normalized = assumeUtcWithoutZone
+    && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(text)
+    ? `${text.replace(' ', 'T')}Z`
+    : text;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function messageMatchesFilters(message, senderFilters = [], subjectFilters = []) {
+  const from = String(message.from || '').toLowerCase();
+  const subject = String(message.subject || '').toLowerCase();
+  const body = `${message.text || ''} ${message.html || ''} ${message.raw || ''}`.toLowerCase();
+  const senderMatch = senderFilters.some((value) => from.includes(String(value || '').toLowerCase()));
+  const subjectMatch = subjectFilters.some((value) => subject.includes(String(value || '').toLowerCase()));
+  const keywordMatch = /openai|chatgpt|verify|verification|confirm|login|验证码|代码|code/.test(`${from} ${subject} ${body}`);
+  return senderMatch || subjectMatch || keywordMatch;
+}
+
+async function fetchDuckDuckGoEmail(options = {}) {
+  throwIfStopped();
+  const state = await getState();
+  const provider = normalizeMailProvider(state.mailProvider);
+  const mail = provider === 'duck_google' ? getDuckGoogleAliasConfig(state) : getDuckDuckGoAliasConfig(state);
+  const validationError = validateDuckAliasConfig(
+    mail,
+    provider === 'duck_google' ? 'Duck + Google' : 'DuckDuckGo'
+  );
+  if (validationError) throw new Error(validationError);
+
+  const { generateNew = true } = options;
+  if (!generateNew && state.email && state.email.toLowerCase().endsWith(`@${mail.aliasDomain}`)) {
+    await addLog(`DuckDuckGo：复用现有邮箱 ${state.email}`, 'ok');
+    return state.email;
+  }
+
+  await addLog(`DuckDuckGo：正在创建别名邮箱（域名 ${mail.aliasDomain}）...`);
+  const data = await fetchJson(joinUrl(mail.apiBase, '/api/email/addresses'), {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: buildBearerAuthHeader(mail.token),
+    },
+    body: JSON.stringify({}),
+  });
+  const localPart = String(data?.address || data?.data?.address || '').trim().replace(/@.*$/, '');
+  if (!localPart) {
+    throw new Error('DuckDuckGo 创建邮箱失败：未返回 alias。');
+  }
+
+  const email = `${localPart}@${mail.aliasDomain}`;
+  await setEmailState(email);
+  await addLog(`DuckDuckGo：已生成 ${email}`, 'ok');
+  return email;
+}
+
+async function fetchSelectedProviderEmail(options = {}) {
+  const state = await getState();
+  const provider = normalizeMailProvider(state.mailProvider);
+  const fetcher = ['duckduckgo', 'duck_google'].includes(provider) ? fetchDuckDuckGoEmail : fetchBurnerEmail;
+  const { generateNew = true } = options;
+
+  if (!generateNew) {
+    const email = await fetcher(options);
+    await rememberGeneratedEmail(email);
+    return email;
+  }
+
+  const usedEmails = new Set([
+    ...(Array.isArray(state.generatedEmails) ? state.generatedEmails : []).map(normalizeEmailAddress),
+    ...((state.accounts || []).map((account) => normalizeEmailAddress(account?.email))),
+  ].filter(Boolean));
+
+  for (let attempt = 1; attempt <= MAX_FRESH_EMAIL_ATTEMPTS; attempt++) {
+    const email = await fetcher(options);
+    const normalized = normalizeEmailAddress(email);
+    if (!usedEmails.has(normalized)) {
+      await rememberGeneratedEmail(email);
+      return email;
+    }
+
+    await addLog(
+      `${getMailProviderLabel(provider)}：命中历史邮箱 ${email}，正在重试获取新邮箱（${attempt}/${MAX_FRESH_EMAIL_ATTEMPTS}）...`,
+      'warn'
+    );
+  }
+
+  throw new Error(`${NO_FRESH_EMAIL_ERROR_MESSAGE}，已连续 ${MAX_FRESH_EMAIL_ATTEMPTS} 次命中历史邮箱。`);
+}
+
+async function continueSelectedProviderAfterChallenge(options = {}) {
+  const state = await getState();
+  const provider = normalizeMailProvider(state.mailProvider);
+  if (provider === 'duckduckgo') {
+    return await fetchDuckDuckGoEmail(options);
+  }
+  return await continueBurnerAfterChallenge(options);
 }
 
 async function continueBurnerAfterChallenge(options = {}) {
@@ -1220,7 +1697,7 @@ async function autoRunLoop(totalRuns) {
   autoRunActive = true;
   autoRunTotalRuns = totalRuns;
   let successfulRuns = 0;
-  let failedRun = null;
+  let failedRuns = 0;
   await setState({ autoRunning: true });
 
   for (let run = 1; run <= totalRuns; run++) {
@@ -1229,6 +1706,12 @@ async function autoRunLoop(totalRuns) {
     // Reset everything at the start of each run (keep VPS/password settings)
     const prevState = await getState();
     const keepSettings = {
+      mailProvider: normalizeMailProvider(prevState.mailProvider),
+      ddgApiBase: normalizeUrlSetting(prevState.ddgApiBase) || DUCKDUCKGO_API_BASE,
+      ddgToken: prevState.ddgToken || '',
+      ddgAliasDomain: normalizeDuckAliasDomain(prevState.ddgAliasDomain),
+      ddgTempMailAddress: normalizeUrlSetting(prevState.ddgTempMailAddress),
+      ddgTempMailJwt: prevState.ddgTempMailJwt || '',
       vpsUrl: prevState.vpsUrl,
       customPassword: prevState.customPassword,
       autoRunning: true,
@@ -1252,8 +1735,9 @@ async function autoRunLoop(totalRuns) {
       let emailReady = false;
       while (!emailReady) {
         try {
-          const burnerEmail = await fetchBurnerEmail({ generateNew: true });
-          await addLog(`=== 第 ${run}/${totalRuns} 轮：Burner 邮箱已就绪：${burnerEmail} ===`, 'ok');
+          const mail = getSelectedMailConfig(await getState());
+          const providerEmail = await fetchSelectedProviderEmail({ generateNew: true });
+          await addLog(`=== 第 ${run}/${totalRuns} 轮：${mail.label} 邮箱已就绪：${providerEmail} ===`, 'ok');
           emailReady = true;
           autoRunResumeMode = null;
         } catch (err) {
@@ -1261,14 +1745,19 @@ async function autoRunLoop(totalRuns) {
             await waitForBurnerChallengeResolution(`Run ${run}/${totalRuns}`);
             continue;
           }
+          if (isNoFreshEmailError(err)) {
+            throw err;
+          }
 
-          await addLog(`Burner Mailbox 自动获取失败：${err.message}`, 'warn');
+          const mail = getSelectedMailConfig(await getState());
+          await addLog(`${mail.label} 自动获取失败：${err.message}`, 'warn');
           break;
         }
       }
 
       if (!emailReady) {
-        await addLog(`=== 第 ${run}/${totalRuns} 轮已暂停：请获取 Burner Mailbox 邮箱或手动粘贴后继续 ===`, 'warn');
+        const mail = getSelectedMailConfig(await getState());
+        await addLog(`=== 第 ${run}/${totalRuns} 轮已暂停：请获取 ${mail.label} 邮箱或手动粘贴后继续 ===`, 'warn');
         autoRunResumeMode = 'email';
         chrome.runtime.sendMessage(status('waiting_email')).catch(() => {});
 
@@ -1299,18 +1788,30 @@ async function autoRunLoop(totalRuns) {
       await executeStepAndWait(8, 2000);
       await executeStepAndWait(9, 1000);
 
-      successfulRuns = run;
+      successfulRuns += 1;
       await addLog(`=== 第 ${run}/${totalRuns} 轮已完成 ===`, 'ok');
 
     } catch (err) {
       if (isStopError(err)) {
         await addLog(`第 ${run}/${totalRuns} 轮已被用户停止`, 'warn');
+        chrome.runtime.sendMessage(status('stopped')).catch(() => {});
+        break;
       } else {
-        failedRun = run;
+        failedRuns += 1;
         await addLog(`第 ${run}/${totalRuns} 轮失败：${err.message}`, 'error');
+        if (isNoFreshEmailError(err)) {
+          chrome.runtime.sendMessage(status('stopped')).catch(() => {});
+          break;
+        }
+        if (run < totalRuns) {
+          await addLog(`第 ${run}/${totalRuns} 轮失败后将休眠 5 秒，并继续下一轮。`, 'warn');
+          chrome.runtime.sendMessage(status('running')).catch(() => {});
+          await sleepWithStop(5000);
+          continue;
+        }
       }
       chrome.runtime.sendMessage(status('stopped')).catch(() => {});
-      break; // Stop on error
+      break;
     }
   }
 
@@ -1318,12 +1819,12 @@ async function autoRunLoop(totalRuns) {
   if (stopRequested) {
     await addLog(`=== 已停止，完成 ${completedRuns}/${autoRunTotalRuns} 轮 ===`, 'warn');
     chrome.runtime.sendMessage({ type: 'AUTO_RUN_STATUS', payload: { phase: 'stopped', currentRun: completedRuns, totalRuns: autoRunTotalRuns } }).catch(() => {});
-  } else if (failedRun !== null) {
-    await addLog(`=== 运行失败，已完成 ${completedRuns}/${autoRunTotalRuns} 轮 ===`, 'error');
-    chrome.runtime.sendMessage({ type: 'AUTO_RUN_STATUS', payload: { phase: 'stopped', currentRun: completedRuns, totalRuns: autoRunTotalRuns } }).catch(() => {});
   } else if (completedRuns >= autoRunTotalRuns) {
     await addLog(`=== 全部 ${autoRunTotalRuns} 轮已成功完成 ===`, 'ok');
     chrome.runtime.sendMessage({ type: 'AUTO_RUN_STATUS', payload: { phase: 'complete', currentRun: completedRuns, totalRuns: autoRunTotalRuns } }).catch(() => {});
+  } else if (failedRuns > 0) {
+    await addLog(`=== 自动运行结束：成功 ${completedRuns} 轮，失败 ${failedRuns} 轮，共 ${autoRunTotalRuns} 轮 ===`, 'warn');
+    chrome.runtime.sendMessage({ type: 'AUTO_RUN_STATUS', payload: { phase: 'stopped', currentRun: completedRuns, totalRuns: autoRunTotalRuns } }).catch(() => {});
   } else {
     await addLog(`=== 已停止，完成 ${completedRuns}/${autoRunTotalRuns} 轮 ===`, 'warn');
     chrome.runtime.sendMessage({ type: 'AUTO_RUN_STATUS', payload: { phase: 'stopped', currentRun: completedRuns, totalRuns: autoRunTotalRuns } }).catch(() => {});
@@ -1424,36 +1925,108 @@ async function executeStep3(state) {
 }
 
 // ============================================================
-// Step 4: Get Signup Verification Code (Burner Mailbox polls, then fills in signup-page.js)
+// Step 4: Get Signup Verification Code (mail provider polls, then fills in signup-page.js)
 // ============================================================
 
 function getMailConfig(state) {
-  return { source: 'burner-mail', url: BURNER_MAILBOX_URL, label: 'Burner Mailbox' };
+  const mail = getSelectedMailConfig(state);
+  const validationError = validateSelectedMailConfig(mail, state);
+  if (validationError) {
+    return { ...mail, error: validationError };
+  }
+  return mail;
 }
 
 function isNoMatchingEmailError(error) {
   const message = error?.message || String(error || '');
-  return message.includes('No matching verification email found') || message.includes('No new matching email found');
+  return (
+    message.includes('No matching verification email found')
+    || message.includes('No new matching email found')
+    || message.includes('未在 Burner Mailbox 中找到匹配的验证码邮件')
+    || message.includes('未找到匹配的验证码邮件')
+    || message.includes('未在 DuckDuckGo 收件箱中找到匹配的验证码邮件')
+    || message.includes('未在 Gmail 收件箱中找到匹配的验证码邮件')
+  );
 }
 
 async function openMailTab(mail) {
   const alive = await isTabAlive(mail.source);
   if (alive) {
     if (mail.navigateOnReuse) {
-      await reuseOrCreateTab(mail.source, mail.url, {
+      return await reuseOrCreateTab(mail.source, mail.url, {
         inject: mail.inject,
         injectSource: mail.injectSource,
       });
     } else {
       const tabId = await getTabId(mail.source);
       await chrome.tabs.update(tabId, { active: true });
+      return tabId;
     }
   } else {
-    await reuseOrCreateTab(mail.source, mail.url, {
+    return await reuseOrCreateTab(mail.source, mail.url, {
       inject: mail.inject,
       injectSource: mail.injectSource,
     });
   }
+}
+
+async function waitForSignupVerificationSurfaceReady(tabId, timeout = 15000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab?.status !== 'complete') {
+        await sleepWithStop(200);
+        continue;
+      }
+
+      const probe = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          };
+
+          const resendSelectors = [
+            'button[name="intent"][value="resend"]',
+            'button[type="submit"][name="intent"][value="resend"]',
+            'button[value="resend"]',
+            'button[form][name="intent"][value="resend"]',
+          ];
+          const hasResendButton = resendSelectors.some((selector) =>
+            Array.from(document.querySelectorAll(selector)).some((el) => {
+              const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+              return !disabled && isVisible(el);
+            })
+          );
+
+          const hasCodeInput = Array.from(document.querySelectorAll(
+            'input[name="code"], input[name="otp"], input[type="text"][maxlength="6"], input[inputmode="numeric"], input[maxlength="1"]'
+          )).some(isVisible);
+
+          return {
+            ready: hasResendButton || hasCodeInput,
+            href: location.href,
+            readyState: document.readyState,
+          };
+        },
+      });
+
+      if (probe?.[0]?.result?.ready) {
+        return probe[0].result;
+      }
+    } catch {}
+
+    await sleepWithStop(250);
+  }
+
+  throw new Error('验证码页面尚未稳定，无法触发重发验证码。');
 }
 
 async function clickResendOnSignupPage(step, clicks = 1) {
@@ -1465,12 +2038,26 @@ async function clickResendOnSignupPage(step, clicks = 1) {
 
   await chrome.tabs.update(signupTabId, { active: true });
   try {
-    await sendToContentScript('signup-page', {
-      type: 'RESEND_VERIFICATION_EMAIL',
-      step,
-      source: 'background',
-      payload: { clicks },
-    });
+    await waitForSignupVerificationSurfaceReady(signupTabId, 15000);
+    for (let i = 0; i < clicks; i++) {
+      const result = await chrome.tabs.sendMessage(signupTabId, {
+        type: 'RESEND_VERIFICATION_EMAIL',
+        step,
+        source: 'background',
+        payload: { clicks: 1 },
+      });
+
+      if (result?.error) {
+        throw new Error(result.error);
+      }
+      if (!result?.rect) {
+        throw new Error('未返回重发邮件按钮坐标。');
+      }
+
+      await clickWithDebugger(signupTabId, result.rect);
+      await addLog(`步骤 ${step}：后台已执行重发邮件真实点击（${i + 1}/${clicks}）："${result.buttonText || '未命名按钮'}"`, 'info');
+      await sleepWithStop(900);
+    }
     return true;
   } catch (err) {
     await addLog(`步骤 ${step}：预先重发验证码已跳过：${err.message}`, 'warn');
@@ -1485,6 +2072,136 @@ async function requestVerificationEmailResend(step, clicks = 2) {
   }
 }
 
+async function submitVerificationCodeAndConfirm(step, code) {
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    throw new Error(step === 4 ? '注册页标签已关闭，无法填写验证码。' : '授权页标签已关闭，无法填写验证码。');
+  }
+
+  await chrome.tabs.update(signupTabId, { active: true });
+  const result = await sendToContentScript('signup-page', {
+    type: 'FILL_CODE',
+    step,
+    source: 'background',
+    payload: { code },
+  });
+
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+
+  if (result?.invalidCode) {
+    await addLog(`步骤 ${step}：验证码校验失败：${result.message || '代码不正确'}，将继续等待新验证码。`, 'warn');
+    return { accepted: false, invalidCode: true, message: result.message || '代码不正确' };
+  }
+
+  return { accepted: true, ...(result || {}) };
+}
+
+async function pollDuckDuckGoVerificationCode(mail, step, options) {
+  const {
+    filterAfterTimestamp,
+    senderFilters,
+    subjectFilters,
+    excludedCodes = new Set(),
+    excludedMailIds = new Set(),
+  } = options;
+
+  const messages = await fetchDuckDuckGoMessages(mail);
+  for (const message of messages) {
+    const messageTimestamp = parseMailTimestamp(message.time, { assumeUtcWithoutZone: true });
+    if (filterAfterTimestamp && messageTimestamp && messageTimestamp < filterAfterTimestamp) {
+      continue;
+    }
+    if (!messageMatchesFilters(message, senderFilters, subjectFilters)) {
+      continue;
+    }
+    if (message.id && excludedMailIds.has(String(message.id))) {
+      continue;
+    }
+
+    const content = [
+      message.subject || '',
+      message.from || '',
+      message.text || '',
+      htmlToText(message.html || ''),
+      message.raw || '',
+    ].join('\n');
+    const code = extractVerificationCodeFromText(content);
+    if (!code) continue;
+    if (excludedCodes.has(code)) {
+      continue;
+    }
+
+    await addLog(`步骤 ${step}：已从 DuckDuckGo 收件箱获取验证码：${code}`, 'ok');
+    return {
+      code,
+      emailTimestamp: messageTimestamp || Date.now(),
+      mailId: message.id ? String(message.id) : '',
+    };
+  }
+
+  throw new Error('未在 DuckDuckGo 收件箱中找到匹配的验证码邮件。');
+}
+
+async function pollWebInboxVerificationCode(mail, step, options) {
+  const {
+    filterAfterTimestamp,
+    senderFilters,
+    subjectFilters,
+    targetEmail,
+    excludedCodes = [],
+    excludedMailIds = [],
+  } = options;
+
+  await addLog(`步骤 ${step}：正在查询 ${mail.label} 收件箱...`);
+  const result = await sendToContentScript(mail.source, {
+    type: 'POLL_EMAIL',
+    step,
+    source: 'background',
+    payload: {
+      filterAfterTimestamp,
+      senderFilters,
+      subjectFilters,
+      targetEmail,
+      maxAttempts: 1,
+      intervalMs: 1000,
+      excludedCodes,
+      excludedMailIds,
+    },
+  });
+
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+  return result;
+}
+
+async function refreshGmailInbox(step, mail) {
+  const gmailTabId = await openMailTab(mail);
+  if (!gmailTabId) {
+    throw new Error('Gmail 标签页不存在，无法刷新收件箱。');
+  }
+
+  const refreshTarget = await sendToContentScript(mail.source, {
+    type: 'GET_REFRESH_BUTTON_RECT',
+    step,
+    source: 'background',
+    payload: {},
+  });
+
+  if (refreshTarget?.error) {
+    throw new Error(refreshTarget.error);
+  }
+  if (!refreshTarget?.rect) {
+    throw new Error('未返回 Gmail 刷新按钮坐标。');
+  }
+
+  await clickWithDebugger(gmailTabId, refreshTarget.rect);
+  await addLog(`步骤 ${step}：已执行 Gmail 收件箱刷新真实点击（${refreshTarget.buttonText || '刷新'}）。`, 'info');
+  await sleepWithStop(1000);
+}
+
 async function pollVerificationCodeWithRetry(step, state, options) {
   const {
     filterAfterTimestamp,
@@ -1493,14 +2210,197 @@ async function pollVerificationCodeWithRetry(step, state, options) {
     targetEmail,
     successLogMessage,
     failureLabel,
+    mailPollAttempts = 2,
+    mailPollIntervalMs = 4000,
+    resendClicks = 2,
+    retryWaitScheduleMs = DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS,
+    excludedCodes = [],
+    excludedMailIds = [],
+    submitCode,
   } = options;
 
   const mail = getMailConfig(state);
   if (mail.error) throw new Error(mail.error);
 
-  const maxResendRounds = 3;
+  const advanceFilterAfterTimestamp = (currentValue, emailTimestamp) => {
+    const numericTimestamp = Number(emailTimestamp);
+    if (!Number.isFinite(numericTimestamp) || numericTimestamp <= 0) {
+      return currentValue || 0;
+    }
+    return Math.max(currentValue || 0, numericTimestamp + 1);
+  };
 
-  for (let round = 0; round <= maxResendRounds; round++) {
+  if (mail.provider === 'duckduckgo') {
+    const totalDurationMs = DEFAULT_STEP_TIMEOUT_MS;
+    const pollIntervalMs = 4000;
+    const resendScheduleMs = DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS;
+    const startedAt = Date.now();
+    const triggeredResends = new Set();
+    const failedCodes = new Set();
+    const failedMailIds = new Set();
+    let currentFilterAfterTimestamp = filterAfterTimestamp || 0;
+
+    while (Date.now() - startedAt <= totalDurationMs) {
+      const elapsedMs = Date.now() - startedAt;
+
+      for (const resendAt of resendScheduleMs) {
+        if (elapsedMs >= resendAt && !triggeredResends.has(resendAt)) {
+          await addLog(`步骤 ${step}：已到第 ${Math.round(resendAt / 1000)} 秒，正在请求重发 ${resendClicks} 次...`, 'warn');
+          await requestVerificationEmailResend(step, resendClicks);
+          triggeredResends.add(resendAt);
+          await humanStepDelay(500, 1100);
+        }
+      }
+
+      try {
+        await addLog(`步骤 ${step}：正在查询 ${mail.label} 收件箱...`);
+        const result = await pollDuckDuckGoVerificationCode(mail, step, {
+          filterAfterTimestamp: currentFilterAfterTimestamp,
+          senderFilters,
+          subjectFilters,
+          excludedCodes: new Set([...excludedCodes, ...failedCodes]),
+          excludedMailIds: new Set([...excludedMailIds, ...failedMailIds]),
+        });
+
+        if (result?.error) {
+          throw new Error(result.error);
+        }
+
+        if (result?.code) {
+          if (result.emailTimestamp) {
+            await setState({ lastEmailTimestamp: result.emailTimestamp });
+          }
+          await addLog(successLogMessage(result.code), 'ok');
+          if (typeof submitCode === 'function') {
+            const submitResult = await submitCode(result.code);
+            if (submitResult?.accepted) {
+              return result.code;
+            }
+            if (submitResult?.invalidCode) {
+              failedCodes.add(result.code);
+              if (result.mailId) {
+                failedMailIds.add(String(result.mailId));
+              }
+              currentFilterAfterTimestamp = advanceFilterAfterTimestamp(
+                currentFilterAfterTimestamp,
+                result.emailTimestamp
+              );
+            } else {
+              throw new Error(submitResult?.message || '验证码提交失败。');
+            }
+          } else {
+            return result.code;
+          }
+        }
+      } catch (err) {
+        if (isBurnerChallengeError(err)) {
+          await waitForBurnerChallengeResolution(`Step ${step}`);
+          continue;
+        }
+        if (!isNoMatchingEmailError(err)) {
+          throw err;
+        }
+      }
+
+      if (Date.now() - startedAt >= totalDurationMs) {
+        break;
+      }
+      await sleepWithStop(pollIntervalMs);
+    }
+
+    throw new Error(`${failureLabel}，3 分钟内未拿到可用验证码。`);
+  }
+
+  if (mail.provider === 'duck_google') {
+    const totalDurationMs = DEFAULT_STEP_TIMEOUT_MS;
+    const pollIntervalMs = 4000;
+    const resendScheduleMs = DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS;
+    const startedAt = Date.now();
+    const triggeredResends = new Set();
+    const failedCodes = new Set();
+    const failedMailIds = new Set();
+    let currentFilterAfterTimestamp = filterAfterTimestamp || 0;
+
+    await openMailTab(mail);
+
+    while (Date.now() - startedAt <= totalDurationMs) {
+      try {
+        await refreshGmailInbox(step, mail);
+        const result = await pollWebInboxVerificationCode(mail, step, {
+          filterAfterTimestamp: currentFilterAfterTimestamp,
+          senderFilters,
+          subjectFilters,
+          targetEmail,
+          excludedCodes: [...excludedCodes, ...failedCodes],
+          excludedMailIds: [...excludedMailIds, ...failedMailIds],
+        });
+
+        if (result?.code) {
+          if (result.emailTimestamp) {
+            await setState({ lastEmailTimestamp: result.emailTimestamp });
+          }
+          await addLog(successLogMessage(result.code), 'ok');
+          if (typeof submitCode === 'function') {
+            const submitResult = await submitCode(result.code);
+            if (submitResult?.accepted) {
+              return result.code;
+            }
+            if (submitResult?.invalidCode) {
+              failedCodes.add(result.code);
+              if (result.mailId) {
+                failedMailIds.add(String(result.mailId));
+              }
+              currentFilterAfterTimestamp = advanceFilterAfterTimestamp(
+                currentFilterAfterTimestamp,
+                result.emailTimestamp
+              );
+              await openMailTab(mail);
+            } else {
+              throw new Error(submitResult?.message || '验证码提交失败。');
+            }
+          } else {
+            return result.code;
+          }
+        }
+      } catch (err) {
+        if (isBurnerChallengeError(err)) {
+          await waitForBurnerChallengeResolution(`Step ${step}`);
+          await openMailTab(mail);
+          continue;
+        }
+        if (!isNoMatchingEmailError(err)) {
+          throw err;
+        }
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      for (const resendAt of resendScheduleMs) {
+        if (elapsedMs >= resendAt && !triggeredResends.has(resendAt)) {
+          await addLog(`步骤 ${step}：已到第 ${Math.round(resendAt / 1000)} 秒，正在返回授权页请求重发 ${resendClicks} 次...`, 'warn');
+          await requestVerificationEmailResend(step, resendClicks);
+          triggeredResends.add(resendAt);
+          await humanStepDelay(500, 1100);
+          await openMailTab(mail);
+        }
+      }
+
+      if (Date.now() - startedAt >= totalDurationMs) {
+        break;
+      }
+      await sleepWithStop(pollIntervalMs);
+    }
+
+    throw new Error(`${failureLabel}，${Math.round(totalDurationMs / 1000)} 秒内未拿到可用验证码。`);
+  }
+
+  const totalDurationMs = DEFAULT_STEP_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const triggeredResends = new Set();
+  const failedCodes = new Set();
+  const failedMailIds = new Set();
+  let currentFilterAfterTimestamp = filterAfterTimestamp || 0;
+
+  while (Date.now() - startedAt <= totalDurationMs) {
     await addLog(`步骤 ${step}：正在打开 ${mail.label}...`);
     await openMailTab(mail);
 
@@ -1511,12 +2411,14 @@ async function pollVerificationCodeWithRetry(step, state, options) {
         step,
         source: 'background',
         payload: {
-          filterAfterTimestamp,
+          filterAfterTimestamp: currentFilterAfterTimestamp,
           senderFilters,
           subjectFilters,
           targetEmail,
-          maxAttempts: 2,
-          intervalMs: 4000,
+          maxAttempts: mailPollAttempts,
+          intervalMs: mailPollIntervalMs,
+          excludedCodes: [...excludedCodes, ...failedCodes],
+          excludedMailIds: [...excludedMailIds, ...failedMailIds],
         },
       });
 
@@ -1529,12 +2431,30 @@ async function pollVerificationCodeWithRetry(step, state, options) {
           await setState({ lastEmailTimestamp: result.emailTimestamp });
         }
         await addLog(successLogMessage(result.code), 'ok');
-        foundCode = result.code;
+        if (typeof submitCode === 'function') {
+          const submitResult = await submitCode(result.code);
+          if (submitResult?.accepted) {
+            foundCode = result.code;
+          } else if (submitResult?.invalidCode) {
+            failedCodes.add(result.code);
+            if (result.mailId) {
+              failedMailIds.add(String(result.mailId));
+            }
+            currentFilterAfterTimestamp = advanceFilterAfterTimestamp(
+              currentFilterAfterTimestamp,
+              result.emailTimestamp
+            );
+            foundCode = null;
+          } else {
+            throw new Error(submitResult?.message || '验证码提交失败。');
+          }
+        } else {
+          foundCode = result.code;
+        }
       }
     } catch (err) {
       if (isBurnerChallengeError(err)) {
         await waitForBurnerChallengeResolution(`Step ${step}`);
-        round -= 1;
         continue;
       }
       if (!isNoMatchingEmailError(err)) {
@@ -1546,20 +2466,26 @@ async function pollVerificationCodeWithRetry(step, state, options) {
       return foundCode;
     }
 
-    if (round === maxResendRounds) {
-      throw new Error(`${failureLabel}，且已重发 3 轮。`);
+    const elapsedMs = Date.now() - startedAt;
+    for (const resendAt of retryWaitScheduleMs) {
+      if (elapsedMs >= resendAt && !triggeredResends.has(resendAt)) {
+        await addLog(`步骤 ${step}：已到第 ${Math.round(resendAt / 1000)} 秒，正在请求重发 ${resendClicks} 次...`, 'warn');
+        await requestVerificationEmailResend(step, resendClicks);
+        triggeredResends.add(resendAt);
+        await humanStepDelay(500, 1100);
+      }
     }
 
-    await addLog(`步骤 ${step}：4 秒内没有新邮件，正在请求重发两次（${round + 1}/${maxResendRounds}）...`, 'warn');
-    await requestVerificationEmailResend(step, 2);
-    await humanStepDelay(500, 1100);
+    if (Date.now() - startedAt >= totalDurationMs) {
+      break;
+    }
+    await sleepWithStop(mailPollIntervalMs);
   }
 
-  throw new Error(failureLabel);
+  throw new Error(`${failureLabel}，${Math.round(totalDurationMs / 1000)} 秒内未拿到可用验证码。`);
 }
 
 async function executeStep4(state) {
-  await clickResendOnSignupPage(4, 1);
   const code = await pollVerificationCodeWithRetry(4, state, {
     filterAfterTimestamp: state.flowStartTime || 0,
     senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt'],
@@ -1567,20 +2493,15 @@ async function executeStep4(state) {
     targetEmail: state.email,
     successLogMessage: (value) => `步骤 4：已获取验证码：${value}`,
     failureLabel: '未收到注册验证码邮件',
+    mailPollAttempts: 5,
+    mailPollIntervalMs: 4000,
+    resendClicks: 1,
+    retryWaitScheduleMs: DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS,
+    submitCode: (value) => submitVerificationCodeAndConfirm(4, value),
   });
-
-  const signupTabId = await getTabId('signup-page');
-  if (signupTabId) {
-    await chrome.tabs.update(signupTabId, { active: true });
-    await sendToContentScript('signup-page', {
-      type: 'FILL_CODE',
-      step: 4,
-      source: 'background',
-      payload: { code },
-    });
-  } else {
-    throw new Error('注册页标签已关闭，无法填写验证码。');
-  }
+  await setState({ lastSignupVerificationCode: code });
+  await setStepStatus(4, 'completed');
+  notifyStepComplete(4, { code });
 }
 
 // ============================================================
@@ -1631,7 +2552,6 @@ async function executeStep6(state) {
 // ============================================================
 
 async function executeStep7(state) {
-  await clickResendOnSignupPage(7, 1);
   const code = await pollVerificationCodeWithRetry(7, state, {
     filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
     senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt'],
@@ -1639,20 +2559,15 @@ async function executeStep7(state) {
     targetEmail: state.email,
     successLogMessage: (value) => `步骤 7：已获取登录验证码：${value}`,
     failureLabel: '未收到登录验证码邮件',
+    mailPollAttempts: 5,
+    mailPollIntervalMs: 4000,
+    resendClicks: 1,
+    retryWaitScheduleMs: DEFAULT_VERIFICATION_RETRY_SCHEDULE_MS,
+    excludedCodes: state.lastSignupVerificationCode ? [state.lastSignupVerificationCode] : [],
+    submitCode: (value) => submitVerificationCodeAndConfirm(7, value),
   });
-
-  const signupTabId = await getTabId('signup-page');
-  if (signupTabId) {
-    await chrome.tabs.update(signupTabId, { active: true });
-    await sendToContentScript('signup-page', {
-      type: 'FILL_CODE',
-      step: 7,
-      source: 'background',
-      payload: { code },
-    });
-  } else {
-    throw new Error('授权页标签已关闭，无法填写验证码。');
-  }
+  await setStepStatus(7, 'completed');
+  notifyStepComplete(7, { code });
 }
 
 // ============================================================
@@ -1736,6 +2651,12 @@ async function executeStep8(state) {
           await addLog('步骤 8：已重新打开授权页标签，准备执行调试器点击...');
         }
 
+        const currentTab = await chrome.tabs.get(signupTabId);
+        const currentUrl = currentTab?.url || '';
+        if (!isExpectedCodexConsentUrl(currentUrl)) {
+          throw new Error(`步骤 8 当前页面不是 Codex 授权确认页。当前：${currentUrl}，预期：${EXPECTED_CODEX_CONSENT_URL}`);
+        }
+
         const clickResult = await sendToContentScript('signup-page', {
           type: 'STEP8_FIND_AND_CLICK',
           source: 'background',
@@ -1815,38 +2736,20 @@ async function executeStep9(state) {
   const vpsUrl = getEffectiveVpsUrl(state.vpsUrl);
 
   await addLog('步骤 9：正在打开 VPS 面板...');
-
-  let tabId = await getTabId('vps-panel');
-  const alive = tabId && await isTabAlive('vps-panel');
-
-  if (!alive) {
-    // Create new tab
-    const wid = await ensureAutomationWindowId();
-    const tab = await chrome.tabs.create({ url: vpsUrl, active: true, windowId: wid });
-    tabId = tab.id;
-    await new Promise(resolve => {
-      const listener = (tid, info) => {
-        if (tid === tabId && info.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
+  const existingTabId = await getTabId('vps-panel');
+  const alive = existingTabId && await isTabAlive('vps-panel');
+  const tabId = alive
+    ? existingTabId
+    : await reuseOrCreateTab('vps-panel', vpsUrl, {
+      inject: ['content/utils.js', 'content/vps-panel.js'],
     });
-  } else {
+
+  if (alive) {
     await chrome.tabs.update(tabId, { active: true });
   }
 
-  // Inject scripts directly and wait for them to be ready
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ['content/utils.js', 'content/vps-panel.js'],
-  });
-  await new Promise(r => setTimeout(r, 1000));
-
-  // Send command directly — bypass queue/ready mechanism
   await addLog('步骤 9：正在填写回调地址...');
-  await chrome.tabs.sendMessage(tabId, {
+  await sendToContentScript('vps-panel', {
     type: 'EXECUTE_STEP',
     step: 9,
     source: 'background',

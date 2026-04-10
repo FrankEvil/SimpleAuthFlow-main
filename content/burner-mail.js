@@ -550,6 +550,8 @@ async function pollBurnerMailbox(step, payload) {
     targetEmail = '',
     maxAttempts = 20,
     intervalMs = 3000,
+    excludedCodes = [],
+    excludedMailIds = [],
   } = payload;
 
   await waitForMailboxReady(20000, { detectChallenge: true });
@@ -586,6 +588,7 @@ async function pollBurnerMailbox(step, payload) {
     for (const row of rows) {
       const rowId = getRowId(row);
       if (!rowId || seenMailIds.has(rowId)) continue;
+      if (excludedMailIds.includes(rowId)) continue;
       const rowWasExisting = existingIds.has(rowId);
       if (!useFallback && rowWasExisting) continue;
 
@@ -600,6 +603,7 @@ async function pollBurnerMailbox(step, payload) {
 
       const code = await extractCodeFromRow(row);
       if (!code) continue;
+      if (excludedCodes.includes(code)) continue;
 
       seenMailIds.add(rowId);
       await persistSeenMailIds();

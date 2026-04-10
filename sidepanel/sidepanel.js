@@ -27,7 +27,81 @@ const autoContinueHint = document.getElementById('auto-continue-hint');
 const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const inputRunCount = document.getElementById('input-run-count');
+const inputMailProvider = document.getElementById('input-mail-provider');
+const inputDdgApiBase = document.getElementById('input-ddg-api-base');
+const inputDdgToken = document.getElementById('input-ddg-token');
+const inputDdgAliasDomain = document.getElementById('input-ddg-alias-domain');
+const inputDdgTempMailAddress = document.getElementById('input-ddg-temp-mail-address');
+const inputDdgTempMailJwt = document.getElementById('input-ddg-temp-mail-jwt');
+const inputDuckGoogleApiBase = document.getElementById('input-duck-google-api-base');
+const inputDuckGoogleToken = document.getElementById('input-duck-google-token');
+const inputDuckGoogleAliasDomain = document.getElementById('input-duck-google-alias-domain');
+const ddgConfigRows = Array.from(document.querySelectorAll('.ddg-config-row'));
+const duckGoogleConfigRows = Array.from(document.querySelectorAll('.duck-google-config-row'));
 let autoContinueMode = 'email';
+
+function getErrorMessage(error) {
+  if (typeof error === 'string') return error;
+  return error?.message || String(error || '');
+}
+
+function isExpectedFlowIssueMessage(message) {
+  const text = (message || '').trim();
+  if (!text) return false;
+
+  return (
+    text.includes('Burner Mailbox 需要进行安全验证')
+    || text.includes('请在邮箱标签页完成验证后再继续')
+    || text.includes('未在 Burner Mailbox 中找到匹配的验证码邮件')
+    || text.includes('未在 DuckDuckGo 收件箱中找到匹配的验证码邮件')
+    || text.includes('未在 Gmail 收件箱中找到匹配的验证码邮件')
+    || (text.includes('Burner Mailbox 当前显示的是') && text.includes('预期应为'))
+    || text.includes('在验证页面中找不到重发邮件按钮')
+    || text.includes('Flow stopped by user')
+    || text.includes('流程已被用户停止')
+  );
+}
+
+function handleUiError(error, fallbackMessage = '操作失败') {
+  const message = getErrorMessage(error);
+  showToast(`${fallbackMessage}：${message}`, 'error');
+  return message;
+}
+
+function getMailProviderLabel(provider) {
+  if (provider === 'duckduckgo') return 'DuckDuckGo';
+  if (provider === 'duck_google') return 'Duck + Google';
+  return 'Burner Mailbox';
+}
+
+function getCurrentMailProvider() {
+  return ['duckduckgo', 'duck_google'].includes(inputMailProvider.value) ? inputMailProvider.value : 'burner-mail';
+}
+
+function getEmailAutoHint(provider = getCurrentMailProvider()) {
+  return `点击“自动”获取 ${getMailProviderLabel(provider)} 邮箱，或手动粘贴后继续`;
+}
+
+function updateMailProviderUi(provider = getCurrentMailProvider()) {
+  const usesDuckDuckGoConfig = provider === 'duckduckgo';
+  const usesDuckGoogleConfig = provider === 'duck_google';
+  ddgConfigRows.forEach((row) => {
+    row.style.display = usesDuckDuckGoConfig ? 'flex' : 'none';
+  });
+  duckGoogleConfigRows.forEach((row) => {
+    row.style.display = usesDuckGoogleConfig ? 'flex' : 'none';
+  });
+
+  inputEmail.placeholder = provider === 'duck_google'
+    ? '自动从 DuckDuckGo 生成 alias，并从 Gmail 读取验证码'
+    : usesDuckDuckGoConfig
+      ? '自动从 DuckDuckGo 生成 alias，或手动粘贴'
+      : '自动从 Burner Mailbox 获取，或手动粘贴';
+
+  if (autoContinueMode === 'email' || autoContinueBar.style.display === 'none') {
+    autoContinueHint.textContent = getEmailAutoHint(provider);
+  }
+}
 
 // ============================================================
 // Toast Notifications
@@ -91,6 +165,16 @@ async function restoreState() {
     if (state.vpsUrl) {
       inputVpsUrl.value = state.vpsUrl;
     }
+    inputMailProvider.value = ['duckduckgo', 'duck_google'].includes(state.mailProvider) ? state.mailProvider : 'burner-mail';
+    inputDdgApiBase.value = state.ddgApiBase || 'https://quack.duckduckgo.com';
+    inputDdgToken.value = state.ddgToken || '';
+    inputDdgAliasDomain.value = state.ddgAliasDomain || 'duck.com';
+    inputDdgTempMailAddress.value = state.ddgTempMailAddress || '';
+    inputDdgTempMailJwt.value = state.ddgTempMailJwt || '';
+    inputDuckGoogleApiBase.value = state.duckGoogleApiBase || 'https://quack.duckduckgo.com';
+    inputDuckGoogleToken.value = state.duckGoogleToken || '';
+    inputDuckGoogleAliasDomain.value = state.duckGoogleAliasDomain || 'duck.com';
+    updateMailProviderUi(inputMailProvider.value);
 
     if (state.stepStatuses) {
       for (const [step, status] of Object.entries(state.stepStatuses)) {
@@ -107,7 +191,7 @@ async function restoreState() {
     updateStatusDisplay(state);
     updateProgressCounter();
   } catch (err) {
-    console.error('Failed to restore state:', err);
+    console.warn('Failed to restore state:', err);
   }
 }
 
@@ -243,19 +327,21 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-async function fetchBurnerEmail() {
+async function fetchSelectedProviderEmail() {
   const defaultLabel = '自动';
   btnFetchEmail.disabled = true;
   btnFetchEmail.textContent = '...';
+  const provider = getCurrentMailProvider();
+  const providerLabel = getMailProviderLabel(provider);
 
   try {
     let response = await chrome.runtime.sendMessage({
-      type: 'FETCH_BURNER_EMAIL',
+      type: 'FETCH_PROVIDER_EMAIL',
       source: 'sidepanel',
       payload: { generateNew: true },
     });
 
-    if (response?.error && /(security verification required|需要.*安全验证)/i.test(response.error)) {
+    if (provider === 'burner-mail' && response?.error && /(security verification required|需要.*安全验证)/i.test(response.error)) {
       const confirmed = window.confirm(
         'Burner Mailbox 需要先完成人机验证。\n\n请切到邮箱页完成验证，完成后点“确定”，我会直接继续获取邮箱，不需要你再点“自动”。'
       );
@@ -264,7 +350,7 @@ async function fetchBurnerEmail() {
       }
 
       response = await chrome.runtime.sendMessage({
-        type: 'CONTINUE_BURNER_AFTER_CHALLENGE',
+        type: 'CONTINUE_MAIL_PROVIDER_AFTER_CHALLENGE',
         source: 'sidepanel',
         payload: { generateNew: true },
       });
@@ -274,11 +360,11 @@ async function fetchBurnerEmail() {
       throw new Error(response.error);
     }
     if (!response?.email) {
-      throw new Error('未返回 Burner Mailbox 邮箱地址。');
+      throw new Error(`未返回 ${providerLabel} 邮箱地址。`);
     }
 
     inputEmail.value = response.email;
-    showToast(`已获取邮箱 ${response.email}`, 'success', 2500);
+    showToast(`已获取 ${providerLabel} 邮箱 ${response.email}`, 'success', 2500);
     return response.email;
   } catch (err) {
     showToast(`自动获取邮箱失败：${err.message}`, 'error');
@@ -300,21 +386,25 @@ function syncPasswordToggleLabel() {
 document.querySelectorAll('.step-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
     const step = Number(btn.dataset.step);
-    if (step === 3) {
-      const email = inputEmail.value.trim();
-      if (!email) {
-        showToast('请先粘贴邮箱地址，或先点击“自动”获取', 'warn');
-        return;
+    try {
+      if (step === 3) {
+        const email = inputEmail.value.trim();
+        if (!email) {
+          showToast('请先粘贴邮箱地址，或先点击“自动”获取', 'warn');
+          return;
+        }
+        await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
+      } else {
+        await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
       }
-      await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
-    } else {
-      await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
+    } catch (err) {
+      handleUiError(err, `步骤 ${step} 启动失败`);
     }
   });
 });
 
 btnFetchEmail.addEventListener('click', async () => {
-  await fetchBurnerEmail().catch(() => {});
+  await fetchSelectedProviderEmail().catch(() => {});
 });
 
 btnTogglePassword.addEventListener('click', () => {
@@ -324,8 +414,13 @@ btnTogglePassword.addEventListener('click', () => {
 
 btnStop.addEventListener('click', async () => {
   btnStop.disabled = true;
-  await chrome.runtime.sendMessage({ type: 'STOP_FLOW', source: 'sidepanel', payload: {} });
-  showToast('正在停止当前流程...', 'warn', 2000);
+  try {
+    await chrome.runtime.sendMessage({ type: 'STOP_FLOW', source: 'sidepanel', payload: {} });
+    showToast('正在停止当前流程...', 'warn', 2000);
+  } catch (err) {
+    handleUiError(err, '停止流程失败');
+    btnStop.disabled = false;
+  }
 });
 
 // Auto Run
@@ -334,48 +429,64 @@ btnAutoRun.addEventListener('click', async () => {
   btnAutoRun.disabled = true;
   inputRunCount.disabled = true;
   btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...';
-  await chrome.runtime.sendMessage({ type: 'AUTO_RUN', source: 'sidepanel', payload: { totalRuns } });
+  try {
+    await chrome.runtime.sendMessage({ type: 'AUTO_RUN', source: 'sidepanel', payload: { totalRuns } });
+  } catch (err) {
+    handleUiError(err, '启动自动运行失败');
+    btnAutoRun.disabled = false;
+    inputRunCount.disabled = false;
+    btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
+  }
 });
 
 btnAutoContinue.addEventListener('click', async () => {
-  if (autoContinueMode === 'email') {
-    const email = inputEmail.value.trim();
-    if (!email) {
-      showToast('请先获取或粘贴 Burner Mailbox 邮箱地址', 'warn');
+  try {
+    if (autoContinueMode === 'email') {
+      const email = inputEmail.value.trim();
+      if (!email) {
+        showToast(`请先获取或粘贴 ${getMailProviderLabel()} 邮箱地址`, 'warn');
+        return;
+      }
+      autoContinueBar.style.display = 'none';
+      autoContinueMode = 'email';
+      await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: { email } });
       return;
     }
+
     autoContinueBar.style.display = 'none';
     autoContinueMode = 'email';
-    await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: { email } });
-    return;
+    await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: {} });
+  } catch (err) {
+    autoContinueBar.style.display = 'flex';
+    handleUiError(err, '继续自动运行失败');
   }
-
-  autoContinueBar.style.display = 'none';
-  autoContinueMode = 'email';
-  await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: {} });
 });
 
 // Reset
 btnReset.addEventListener('click', async () => {
   if (confirm('确认重置全部步骤和数据吗？')) {
-    await chrome.runtime.sendMessage({ type: 'RESET', source: 'sidepanel' });
-    displayOauthUrl.textContent = '等待中...';
-    displayOauthUrl.classList.remove('has-value');
-    displayLocalhostUrl.textContent = '等待中...';
-    displayLocalhostUrl.classList.remove('has-value');
-    inputEmail.value = '';
-    displayStatus.textContent = '就绪';
-    statusBar.className = 'status-bar';
-    logArea.innerHTML = '';
-    document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
-    document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
-    btnAutoRun.disabled = false;
-    inputRunCount.disabled = false;
-    btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
-    autoContinueBar.style.display = 'none';
-    updateStopButtonState(false);
-    updateButtonStates();
-    updateProgressCounter();
+    try {
+      await chrome.runtime.sendMessage({ type: 'RESET', source: 'sidepanel' });
+      displayOauthUrl.textContent = '等待中...';
+      displayOauthUrl.classList.remove('has-value');
+      displayLocalhostUrl.textContent = '等待中...';
+      displayLocalhostUrl.classList.remove('has-value');
+      inputEmail.value = '';
+      displayStatus.textContent = '就绪';
+      statusBar.className = 'status-bar';
+      logArea.innerHTML = '';
+      document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
+      document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
+      btnAutoRun.disabled = false;
+      inputRunCount.disabled = false;
+      btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
+      autoContinueBar.style.display = 'none';
+      updateStopButtonState(false);
+      updateButtonStates();
+      updateProgressCounter();
+    } catch (err) {
+      handleUiError(err, '重置失败');
+    }
   }
 });
 
@@ -397,12 +508,93 @@ inputVpsUrl.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({ type: 'SAVE_SETTING', source: 'sidepanel', payload: { vpsUrl } });
 });
 
+inputMailProvider.addEventListener('change', async () => {
+  const mailProvider = getCurrentMailProvider();
+  updateMailProviderUi(mailProvider);
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { mailProvider },
+  });
+});
+
 inputPassword.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
     source: 'sidepanel',
     payload: { customPassword: inputPassword.value },
   });
+});
+
+inputDdgApiBase.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { ddgApiBase: inputDdgApiBase.value.trim() },
+  });
+});
+
+inputDdgToken.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { ddgToken: inputDdgToken.value.trim() },
+  });
+});
+
+inputDdgAliasDomain.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { ddgAliasDomain: inputDdgAliasDomain.value.trim() },
+  });
+});
+
+inputDdgTempMailAddress.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { ddgTempMailAddress: inputDdgTempMailAddress.value.trim() },
+  });
+});
+
+inputDdgTempMailJwt.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { ddgTempMailJwt: inputDdgTempMailJwt.value.trim() },
+  });
+});
+
+inputDuckGoogleApiBase.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { duckGoogleApiBase: inputDuckGoogleApiBase.value.trim() },
+  });
+});
+
+inputDuckGoogleToken.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { duckGoogleToken: inputDuckGoogleToken.value.trim() },
+  });
+});
+
+inputDuckGoogleAliasDomain.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { duckGoogleAliasDomain: inputDuckGoogleAliasDomain.value.trim() },
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const message = getErrorMessage(event.reason);
+  if (!isExpectedFlowIssueMessage(message)) return;
+  showToast(message, 'warn', 3500);
+  event.preventDefault();
 });
 
 // ============================================================
@@ -452,7 +644,7 @@ chrome.runtime.onMessage.addListener((message) => {
       document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
       updateStopButtonState(false);
       autoContinueMode = 'email';
-      autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
+      autoContinueHint.textContent = getEmailAutoHint(getCurrentMailProvider());
       updateProgressCounter();
       break;
     }
@@ -460,6 +652,10 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'DATA_UPDATED': {
       if (message.payload.email) {
         inputEmail.value = message.payload.email;
+      }
+      if (message.payload.mailProvider) {
+        inputMailProvider.value = message.payload.mailProvider;
+        updateMailProviderUi(message.payload.mailProvider);
       }
       if (message.payload.password !== undefined) {
         inputPassword.value = message.payload.password || '';
@@ -482,7 +678,7 @@ chrome.runtime.onMessage.addListener((message) => {
         case 'waiting_email':
           autoContinueBar.style.display = 'flex';
           autoContinueMode = 'email';
-          autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
+          autoContinueHint.textContent = getEmailAutoHint(getCurrentMailProvider());
           btnAutoRun.innerHTML = `已暂停${runLabel}`;
           updateStopButtonState(true);
           break;
@@ -503,7 +699,7 @@ chrome.runtime.onMessage.addListener((message) => {
           btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
           autoContinueBar.style.display = 'none';
           autoContinueMode = 'email';
-          autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
+          autoContinueHint.textContent = getEmailAutoHint(getCurrentMailProvider());
           updateStopButtonState(false);
           break;
         case 'stopped':
@@ -512,7 +708,7 @@ chrome.runtime.onMessage.addListener((message) => {
           btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
           autoContinueBar.style.display = 'none';
           autoContinueMode = 'email';
-          autoContinueHint.textContent = '点击“自动”获取 Burner Mailbox 邮箱，或手动粘贴后继续';
+          autoContinueHint.textContent = getEmailAutoHint(getCurrentMailProvider());
           updateStopButtonState(false);
           break;
       }

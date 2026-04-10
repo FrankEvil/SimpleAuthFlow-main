@@ -5,6 +5,7 @@ const SCRIPT_SOURCE = (() => {
   const url = location.href;
   if (url.includes('auth0.openai.com') || url.includes('auth.openai.com') || url.includes('accounts.openai.com')) return 'signup-page';
   if (url.includes('burnermailbox.com/mailbox') || url.includes('burnermailbox.com/switch/')) return 'burner-mail';
+  if (url.includes('mail.google.com')) return 'gmail-mail';
   if (url.includes('chatgpt.com')) return 'chatgpt';
   // VPS panel — detected dynamically since URL is configurable
   return 'vps-panel';
@@ -13,6 +14,29 @@ const SCRIPT_SOURCE = (() => {
 const LOG_PREFIX = `[SimpleAuthFlow:${SCRIPT_SOURCE}]`;
 const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 let flowStopped = false;
+
+function getErrorMessage(error) {
+  if (typeof error === 'string') return error;
+  return error?.message || String(error || '');
+}
+
+function isExpectedFlowIssueMessage(message) {
+  const text = (message || '').trim();
+  if (!text) return false;
+
+  return (
+    text === STOP_ERROR_MESSAGE
+    || text.includes('流程已被用户停止')
+    || text.includes('Flow stopped by user')
+    || text.includes('Burner Mailbox 需要进行安全验证')
+    || text.includes('请在邮箱标签页完成验证后再继续')
+    || text.includes('未在 Burner Mailbox 中找到匹配的验证码邮件')
+    || text.includes('未在 DuckDuckGo 收件箱中找到匹配的验证码邮件')
+    || text.includes('未在 Gmail 收件箱中找到匹配的验证码邮件')
+    || (text.includes('Burner Mailbox 当前显示的是') && text.includes('预期应为'))
+    || text.includes('在验证页面中找不到重发邮件按钮')
+  );
+}
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'STOP_FLOW') {
@@ -26,7 +50,7 @@ function resetStopState() {
 }
 
 function isStopError(error) {
-  const message = typeof error === 'string' ? error : error?.message;
+  const message = getErrorMessage(error);
   return message === STOP_ERROR_MESSAGE;
 }
 
@@ -90,7 +114,7 @@ function waitForElement(selector, timeout = 10000) {
     const timer = setTimeout(() => {
       cleanup();
       const msg = `Timeout waiting for ${selector} after ${timeout}ms on ${location.href}`;
-      console.error(LOG_PREFIX, msg);
+      console.warn(LOG_PREFIX, msg);
       reject(new Error(msg));
     }, timeout);
 
@@ -172,7 +196,7 @@ function waitForElementByText(containerSelector, textPattern, timeout = 10000) {
     const timer = setTimeout(() => {
       cleanup();
       const msg = `Timeout waiting for text "${textPattern}" in "${containerSelector}" after ${timeout}ms on ${location.href}`;
-      console.error(LOG_PREFIX, msg);
+      console.warn(LOG_PREFIX, msg);
       reject(new Error(msg));
     }, timeout);
 
@@ -273,7 +297,8 @@ function reportComplete(step, data = {}) {
  * @param {string} errorMessage
  */
 function reportError(step, errorMessage) {
-  console.error(LOG_PREFIX, `Step ${step} failed: ${errorMessage}`);
+  const reporter = isExpectedFlowIssueMessage(errorMessage) ? console.warn : console.error;
+  reporter(LOG_PREFIX, `Step ${step} failed: ${errorMessage}`);
   log(`Step ${step} failed: ${errorMessage}`, 'error');
   chrome.runtime.sendMessage({
     type: 'STEP_ERROR',
@@ -331,3 +356,17 @@ const _isMailChildFrame = SCRIPT_SOURCE === 'burner-mail' && window !== window.t
 if (!_isMailChildFrame) {
   reportReady();
 }
+
+window.addEventListener('unhandledrejection', (event) => {
+  const message = getErrorMessage(event.reason);
+  if (!isExpectedFlowIssueMessage(message)) return;
+  console.warn(LOG_PREFIX, `Handled expected rejection: ${message}`);
+  event.preventDefault();
+});
+
+window.addEventListener('error', (event) => {
+  const message = event?.message || '';
+  if (!isExpectedFlowIssueMessage(message)) return;
+  console.warn(LOG_PREFIX, `Handled expected error: ${message}`);
+  event.preventDefault();
+});

@@ -1,0 +1,263 @@
+/* ============================================================
+   SimpleAuthFlow — Options Page
+   风格与侧边栏一致：Swiss Modernism + Developer Tool
+   ============================================================ */
+
+:root {
+  --bg-base: #ffffff;
+  --bg-surface: #f7f8fa;
+  --bg-elevated: #eef0f4;
+  --bg-hover: #e4e7ec;
+  --bg-active: #dce0e8;
+  --border: #d8dce3;
+  --border-subtle: #e8ecf1;
+  --text-primary: #1a1d24;
+  --text-secondary: #5c6370;
+  --text-muted: #9ca3af;
+  --blue: #2563eb;
+  --blue-soft: rgba(37, 99, 235, 0.08);
+  --green: #16a34a;
+  --green-soft: rgba(22, 163, 74, 0.08);
+  --red: #dc2626;
+  --red-soft: rgba(220, 38, 38, 0.08);
+  --orange: #ea580c;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 2px 6px rgba(0,0,0,0.06);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --transition: 150ms ease;
+}
+
+[data-theme="dark"] {
+  --bg-base: #0f1117;
+  --bg-surface: #181a21;
+  --bg-elevated: #21242d;
+  --bg-hover: #2a2e38;
+  --bg-active: #323844;
+  --border: #2a2e38;
+  --border-subtle: #21242d;
+  --text-primary: #e4e6eb;
+  --text-secondary: #8b919e;
+  --text-muted: #565c6a;
+  --blue: #3b82f6;
+  --blue-soft: rgba(59, 130, 246, 0.12);
+  --green: #22c55e;
+  --green-soft: rgba(34, 197, 94, 0.12);
+  --red: #ef4444;
+  --red-soft: rgba(239, 68, 68, 0.12);
+  --orange: #f97316;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+.container {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+/* ---- Header ---- */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 32px;
+}
+
+header .title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+header .subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.theme-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: var(--transition);
+  display: flex;
+  align-items: center;
+}
+.theme-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+[data-theme="dark"] .icon-moon { display: none; }
+:not([data-theme="dark"]) .icon-sun { display: none; }
+
+/* ---- Section ---- */
+.section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.section-title svg { opacity: 0.6; }
+
+/* ---- Form ---- */
+.form-group {
+  margin-bottom: 14px;
+}
+.form-group:last-child { margin-bottom: 0; }
+
+.form-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 5px;
+}
+
+.form-label .required {
+  color: var(--red);
+  margin-left: 2px;
+}
+
+.form-input,
+.form-select {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: var(--transition);
+  outline: none;
+}
+
+.form-input:focus,
+.form-select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px var(--blue-soft);
+}
+
+.form-input::placeholder { color: var(--text-muted); font-family: 'Inter', sans-serif; }
+
+.form-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+/* ---- Provider Config (dynamic fields) ---- */
+#provider-config {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+#provider-config:empty {
+  display: none;
+}
+
+.provider-name {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+/* ---- Buttons ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  border: none;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.btn-primary {
+  background: var(--blue);
+  color: #fff;
+}
+.btn-primary:hover { filter: brightness(1.1); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ---- Actions ---- */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+/* ---- Toast ---- */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  padding: 10px 20px;
+  font-size: 13px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transition: all 300ms ease;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.toast.success { background: var(--green); color: #fff; }
+.toast.error { background: var(--red); color: #fff; }
+
+/* ---- Validation error ---- */
+.form-input.error,
+.form-select.error {
+  border-color: var(--red);
+  box-shadow: 0 0 0 2px var(--red-soft);
+}

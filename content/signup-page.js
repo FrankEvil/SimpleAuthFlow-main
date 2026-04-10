@@ -3,6 +3,8 @@
 
 console.log('[SimpleAuthFlow:signup-page] Content script loaded on', location.href);
 
+const EXPECTED_CODEX_CONSENT_URL = 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent';
+
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'RESEND_VERIFICATION_EMAIL') {
@@ -164,11 +166,52 @@ async function fillVerificationCode(step, payload) {
 
   log(`步骤 ${step}：正在填写验证码：${code}`);
 
+  const invalidCodePattern = /代码不正确|验证码不正确|invalid code|incorrect code|wrong code/i;
+  const codeInputSelector = 'input[name="code"], input[name="otp"], input[type="text"][maxlength="6"], input[aria-label*="code"], input[placeholder*="code"], input[placeholder*="Code"], input[inputmode="numeric"]';
+  const hasVisibleCodeInputs = () => {
+    const mainInput = Array.from(document.querySelectorAll(codeInputSelector)).some(isElementVisible);
+    const singleInputs = Array.from(document.querySelectorAll('input[maxlength="1"]')).filter(isElementVisible);
+    return mainInput || singleInputs.length >= 6;
+  };
+  const readInvalidCodeMessage = () => {
+    const candidates = Array.from(document.querySelectorAll('[slot="errorMessage"], .react-aria-FieldError, [aria-live="polite"]'));
+    for (const el of candidates) {
+      const text = (el.textContent || '').trim();
+      if (invalidCodePattern.test(text)) {
+        return text;
+      }
+    }
+    return '';
+  };
+  const waitForVerificationResult = async (initialUrl) => {
+    const start = Date.now();
+    while (Date.now() - start < 15000) {
+      throwIfStopped();
+
+      const invalidMessage = readInvalidCodeMessage();
+      if (invalidMessage) {
+        return { accepted: false, invalidCode: true, message: invalidMessage };
+      }
+
+      const urlChanged = location.href !== initialUrl;
+      const codeInputsVisible = hasVisibleCodeInputs();
+      const nameInputVisible = !!document.querySelector('input[name="name"], input[placeholder*="全名"], input[autocomplete="name"]');
+      const ageOrBirthdayVisible = !!document.querySelector('input[name="age"], input[name="birthday"], [role="spinbutton"], button[aria-haspopup="listbox"], [role="button"][aria-haspopup="listbox"]');
+      if (urlChanged || !codeInputsVisible || nameInputVisible || ageOrBirthdayVisible) {
+        return { accepted: true };
+      }
+
+      await sleep(250);
+    }
+
+    return { accepted: true, uncertain: true };
+  };
+
   // Find code input — could be a single input or multiple separate inputs
   let codeInput = null;
   try {
     codeInput = await waitForElement(
-      'input[name="code"], input[name="otp"], input[type="text"][maxlength="6"], input[aria-label*="code"], input[placeholder*="code"], input[placeholder*="Code"], input[inputmode="numeric"]',
+      codeInputSelector,
       10000
     );
   } catch {
@@ -180,9 +223,16 @@ async function fillVerificationCode(step, payload) {
         fillInput(singleInputs[i], code[i]);
         await sleep(100);
       }
-      await sleep(1000);
-      reportComplete(step);
-      return;
+
+      const initialUrl = location.href;
+      const submitBtn = document.querySelector('button[type="submit"]')
+        || await waitForElementByText('button', /verify|confirm|submit|continue|确认|验证/i, 5000).catch(() => null);
+      if (submitBtn) {
+        await humanPause(450, 1200);
+        simulateClick(submitBtn);
+        log(`步骤 ${step}：验证码已提交`);
+      }
+      return await waitForVerificationResult(initialUrl);
     }
     throw new Error('找不到验证码输入框。URL：' + location.href);
   }
@@ -190,19 +240,19 @@ async function fillVerificationCode(step, payload) {
   fillInput(codeInput, code);
   log(`步骤 ${step}：验证码已填写`);
 
-  // Report complete BEFORE submit (page may navigate away)
-  reportComplete(step);
-
   // Submit
   await sleep(500);
   const submitBtn = document.querySelector('button[type="submit"]')
     || await waitForElementByText('button', /verify|confirm|submit|continue|确认|验证/i, 5000).catch(() => null);
 
+  const initialUrl = location.href;
   if (submitBtn) {
     await humanPause(450, 1200);
     simulateClick(submitBtn);
     log(`步骤 ${step}：验证码已提交`);
   }
+
+  return await waitForVerificationResult(initialUrl);
 }
 
 async function resendVerificationEmail(step, payload = {}) {
@@ -212,17 +262,33 @@ async function resendVerificationEmail(step, payload = {}) {
 
   for (let i = 0; i < clicks; i++) {
     const resendBtn = await waitForResendButton(10000);
-    await humanPause(350, 900);
-    simulateClick(resendBtn);
-    log(`步骤 ${step}：已点击重发邮件按钮（${i + 1}/${clicks}）`);
-    await sleep(700);
+    await waitForResendButtonReady(resendBtn, 800, 12000);
+    const buttonLabel = (
+      resendBtn.textContent
+      || resendBtn.value
+      || resendBtn.getAttribute('aria-label')
+      || ''
+    ).trim();
+    resendBtn.scrollIntoView({ block: 'center', inline: 'center' });
+    resendBtn.focus();
+    await sleep(250);
+    const rect = getSerializableRect(resendBtn);
+    log(`步骤 ${step}：已找到重发邮件按钮（${i + 1}/${clicks}）："${buttonLabel || '未命名按钮'}"，等待后台执行真实点击。`);
+
+    return {
+      clickMode: 'debugger',
+      rect,
+      buttonText: buttonLabel,
+      url: location.href,
+      clicks,
+    };
   }
 
-  return { resent: true, clicks };
+  return { resent: false, clicks };
 }
 
 async function waitForResendButton(timeout = 10000) {
-  const selector = 'button[name="intent"][value="resend"], button[value="resend"], button[type="submit"][name="intent"]';
+  const selector = 'button[name="intent"][value="resend"], button[type="submit"][name="intent"][value="resend"], button[value="resend"], button[form][name="intent"][value="resend"]';
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
@@ -245,6 +311,45 @@ async function waitForResendButton(timeout = 10000) {
   }
 
   throw new Error('在验证页面中找不到重发邮件按钮。URL：' + location.href);
+}
+
+async function waitForResendButtonReady(button, stableMs = 800, timeout = 12000) {
+  const start = Date.now();
+  let stableSince = 0;
+  let lastSignature = '';
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const connected = button?.isConnected;
+    const visible = isElementVisible(button);
+    const disabled = button?.disabled || button?.getAttribute('aria-disabled') === 'true';
+    const readyStateOk = document.readyState === 'complete' || document.readyState === 'interactive';
+    const rect = button?.getBoundingClientRect?.();
+    const signature = [
+      location.href,
+      button?.textContent?.trim() || '',
+      button?.getAttribute('value') || '',
+      rect ? `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}` : 'no-rect',
+    ].join('|');
+
+    if (connected && visible && !disabled && readyStateOk) {
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        stableSince = Date.now();
+      }
+      if (stableSince && Date.now() - stableSince >= stableMs) {
+        return;
+      }
+    } else {
+      stableSince = 0;
+      lastSignature = '';
+    }
+
+    await sleep(100);
+  }
+
+  throw new Error('重发邮件按钮尚未稳定可交互。URL：' + location.href);
 }
 
 // ============================================================
@@ -354,6 +459,11 @@ function isElementVisible(el) {
 
 async function step8_findAndClick() {
   log('步骤 8：正在查找 OAuth 授权确认页中的“继续”按钮...');
+
+  const currentUrl = `${location.origin}${location.pathname}`;
+  if (currentUrl !== EXPECTED_CODEX_CONSENT_URL) {
+    throw new Error(`当前页面不是 Codex 授权确认页。当前：${currentUrl}，预期：${EXPECTED_CODEX_CONSENT_URL}`);
+  }
 
   const continueBtn = await findContinueButton();
   await waitForButtonEnabled(continueBtn);
@@ -773,35 +883,44 @@ async function step5_fillNameBirthday(payload) {
       log('步骤 5：检测到生日微调按钮，正在填写生日...');
 
       async function setSpinButton(el, value) {
+        const targetValue = Number(value);
+        if (Number.isNaN(targetValue)) {
+          throw new Error(`生日微调按钮目标值无效：${value}`);
+        }
+
+        const readSpinButtonValue = () => {
+          const ariaNow = el.getAttribute('aria-valuenow') || '';
+          const source = `${ariaNow} ${el.textContent || ''}`.trim();
+          const match = source.match(/\d{1,4}/);
+          return match ? Number(match[0]) : Number.NaN;
+        };
+
         el.focus();
-        await sleep(100);
+        el.click?.();
+        await sleep(200);
 
-        document.execCommand?.('selectAll', false, null);
-        await sleep(50);
-
-        if (typeof InputEvent === 'function') {
-          const clearEvents = [
-            new InputEvent('beforeinput', { inputType: 'deleteContentBackward', data: null, bubbles: true }),
-            new InputEvent('input', { inputType: 'deleteContentBackward', data: null, bubbles: true }),
-          ];
-          for (const event of clearEvents) {
-            el.dispatchEvent(event);
-          }
+        if (Number.isNaN(readSpinButtonValue())) {
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
+          await sleep(100);
         }
 
-        const valueStr = String(value);
-        for (const char of valueStr) {
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: `Digit${char}`, bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent('keypress', { key: char, code: `Digit${char}`, bubbles: true }));
-          if (typeof InputEvent === 'function') {
-            el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: char, bubbles: true }));
-            el.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: char, bubbles: true }));
+        for (let i = 0; i < 100; i++) {
+          const currentValue = readSpinButtonValue();
+          if (!Number.isNaN(currentValue) && currentValue === targetValue) {
+            break;
           }
-          await sleep(50);
-          el.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: `Digit${char}`, bubbles: true }));
+
+          const key = Number.isNaN(currentValue) || currentValue < targetValue ? 'ArrowUp' : 'ArrowDown';
+          el.dispatchEvent(new KeyboardEvent('keydown', { key, code: key, bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { key, code: key, bubbles: true }));
+          await sleep(80);
         }
 
-        el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', code: 'Tab', bubbles: true }));
+        el.setAttribute('aria-valuenow', String(targetValue));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
         el.blur?.();
         await sleep(100);
       }
@@ -809,9 +928,9 @@ async function step5_fillNameBirthday(payload) {
       await humanPause(450, 1100);
       await setSpinButton(yearSpinner, year);
       await humanPause(250, 650);
-      await setSpinButton(monthSpinner, String(month).padStart(2, '0'));
+      await setSpinButton(monthSpinner, month);
       await humanPause(250, 650);
-      await setSpinButton(daySpinner, String(day).padStart(2, '0'));
+      await setSpinButton(daySpinner, day);
       log(`步骤 5：生日已填写：${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
       const hiddenBirthday = document.querySelector('input[type="hidden"][name="birthday"]');
       if (hiddenBirthday) {
@@ -886,12 +1005,46 @@ async function step5_fillNameBirthday(payload) {
   const completeBtn = document.querySelector('button[type="submit"]')
     || await waitForElementByText('button', /完成|create|continue|finish|done|agree/i, 5000).catch(() => null);
 
-  // Report complete BEFORE submit (page navigates to add-phone after this)
-  reportComplete(5);
-
   if (completeBtn) {
+    const initialUrl = location.href;
     await humanPause(500, 1300);
     simulateClick(completeBtn);
     log('步骤 5：已点击“完成帐户创建”');
+    await waitForStep5Transition(initialUrl, 30000);
+    reportComplete(5);
   }
+}
+
+async function waitForStep5Transition(initialUrl, timeout = 30000) {
+  const start = Date.now();
+  const profileSelector = 'input[name="name"], input[placeholder*="全名"], input[autocomplete="name"]';
+  const loginSelector = 'input[type="email"], input[name="email"], input[name="username"], input[id*="email"], input[placeholder*="email" i], input[placeholder*="Email"]';
+  const codeSelector = 'input[name="code"], input[name="otp"], input[type="text"][maxlength="6"], input[inputmode="numeric"], input[maxlength="1"]';
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const currentUrl = location.href;
+    if (currentUrl !== initialUrl) {
+      log(`步骤 5：页面已跳转到下一阶段：${currentUrl}`);
+      return;
+    }
+
+    const profileVisible = Array.from(document.querySelectorAll(profileSelector)).some(isElementVisible);
+    const loginVisible = Array.from(document.querySelectorAll(loginSelector)).some(isElementVisible) || Boolean(findVisiblePasswordInput());
+    const codeVisible = Array.from(document.querySelectorAll(codeSelector)).some(isElementVisible);
+    const consentVisible = currentUrl.startsWith(EXPECTED_CODEX_CONSENT_URL)
+      || Array.from(document.querySelectorAll('button, [role="button"]')).some((button) => {
+        return isElementVisible(button) && /继续|continue/i.test(button.textContent || '');
+      });
+
+    if (!profileVisible && (loginVisible || codeVisible || consentVisible)) {
+      log('步骤 5：已检测到资料页退出，准备进入下一步骤。');
+      return;
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error('点击“完成帐户创建”后页面未在预期时间内跳转到下一阶段。');
 }
